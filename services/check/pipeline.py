@@ -28,12 +28,27 @@ MAX_SOURCES = 5
 PAGE_TEXT_LIMIT = 20_000
 MAX_SPAN_CHARS = 600
 
+REPORT_EXCERPT_CHARS = 1500
+
+# The legacy report vocabulary, kept at the user's request (a deliberate deviation from P1.4 and
+# DECISIONS.md #6). Anything the model returns outside these sets is discarded.
+REPORT_TAGS = frozenset({"Misleading", "True", "False", "Partially True", "Unverified"})
+CREDIBILITY_CATEGORIES = frozenset({"Highly Credible", "Moderate", "Low Credibility", "Unreliable"})
+NO_CONCLUSION = "Unverified: there was not enough verifiable evidence to reach a conclusion."
+NO_SUMMARY = "A written summary could not be generated for this check."
+NO_CLAIMS_SUMMARY = "No specific claims could be checked in this content."
+NO_SOURCES_SUMMARY = "No readable sources were found for the claims in this content."
+
 PERSON_NOTICE = (
     "This tool checks factual claims, not people or accounts, so it can't assess who someone is "
     "or why they posted. Paste a specific claim to see the evidence for it."
 )
 
 Stance = Literal["supports", "contradicts", "neutral"]
+
+
+class GeminiError(RuntimeError):
+    """The model call failed or returned output we cannot use."""
 
 
 class CheckError(Exception):
@@ -69,6 +84,29 @@ class StanceOut(BaseModel):
     span: str
 
 
+class ReportConclusion(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    index: int
+    conclusion: str
+
+
+class ReportSource(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    index: int
+    credibility_score: int
+    category: str
+    flags: list[str] = Field(default_factory=list)
+    reasoning: str = ""
+
+
+class ReportOut(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    tag: str = "Unverified"
+    overall_summary: str = ""
+    conclusions: list[ReportConclusion] = Field(default_factory=list)
+    sources: list[ReportSource] = Field(default_factory=list)
+
+
 class Gateway(Protocol):
     async def extract(
         self, *, text: str | None, image: tuple[bytes, str] | None,
@@ -78,6 +116,8 @@ class Gateway(Protocol):
     async def ground(self, claim_text: str) -> list[GroundedSource]: ...
 
     async def stances(self, claim_text: str, pages: list[str]) -> list[StanceOut]: ...
+
+    async def report(self, *, claims: list[dict], sources: list[dict]) -> ReportOut: ...
 
 
 class Fetcher(Protocol):
@@ -101,6 +141,7 @@ class Analysis:
     cards: list[dict] = field(default_factory=list)
     notice: str | None = None
     matched: bool = False
+    report: dict | None = None
 
 
 # ---------------------------------------------------------------------- pure helpers
@@ -222,13 +263,54 @@ def build_card(claim_id: str, text: str, evidence: list[dict], config_claim: Cla
     }
 
 
+def build_report(cards: list[dict], pages: list[FetchedPage], out: ReportOut | None,
+                 fallback_summary: str = NO_SUMMARY) -> dict:
+    """The legacy-shaped report. Evidence lists are the span-verified evidence, source URLs are the
+    pages we fetched, and every model-written field is validated or replaced."""
+    out = out or ReportOut()
+    conclusions = {
+        c.index: c.conclusion.strip()
+        for c in out.conclusions
+        if 0 <= c.index < len(cards) and c.conclusion.strip()
+    }
+    analysed = [
+        {
+            "claim_text": card["text"],
+            "supporting_evidence": [{"summary": e["span"], "source": e["url"]}
+                                    for e in card["evidence"] if e["stance"] == "supports"],
+            "opposing_evidence": [{"summary": e["span"], "source": e["url"]}
+                                  for e in card["evidence"] if e["stance"] == "contradicts"],
+            "fact_checking_results": [],  # the fact-check database lookup is out of scope (PRD)
+            "conclusion": conclusions.get(i, NO_CONCLUSION),
+        }
+        for i, card in enumerate(cards)
+    ]
+    kept: dict[int, dict] = {}
+    for s in out.sources:
+        if not (0 <= s.index < len(pages)) or s.index in kept or s.category not in CREDIBILITY_CATEGORIES:
+            continue
+        kept[s.index] = {
+            "url": pages[s.index].url,
+            "credibility_score": max(0, min(100, s.credibility_score)),
+            "category": s.category,
+            "flags": [f.strip()[:200] for f in s.flags if f.strip()][:5],
+            "reasoning": s.reasoning.strip()[:600],
+        }
+    return {
+        "tag": out.tag if out.tag in REPORT_TAGS else "Unverified",
+        "overall_summary": out.overall_summary.strip()[:1200] or fallback_summary,
+        "analyzed_claims": analysed,
+        "source_credibility_summary": [kept[i] for i in sorted(kept)],
+    }
+
+
 # ------------------------------------------------------------------- orchestration
 
 
 async def _card_for(
     claim: ExtractedClaim, config_claim: ClaimToCheck | None, *, gateway: Gateway, fetcher: Fetcher,
     event: EventConfig, budget: Budget, fetched_at: str,
-) -> dict:
+) -> tuple[dict, list[FetchedPage]]:
     text = config_claim.text if config_claim else claim.text
     claim_id = config_claim.id if config_claim else "chk-" + hashlib.sha1(text.encode()).hexdigest()[:12]
 
@@ -249,7 +331,7 @@ async def _card_for(
         texts = [p.text[:PAGE_TEXT_LIMIT] for p in pages]
         _reserve(budget)
         evidence = verified_evidence(await gateway.stances(text, texts), pages, texts, event, fetched_at)
-    return build_card(claim_id, text, evidence, config_claim, event)
+    return build_card(claim_id, text, evidence, config_claim, event), pages
 
 
 async def analyse(
@@ -284,9 +366,39 @@ async def analyse(
         chosen.append((claim, config_claim))
 
     fetched_at = _utc_iso(now())
-    cards = await asyncio.gather(*(
+    results = await asyncio.gather(*(
         _card_for(c, cfg, gateway=gateway, fetcher=fetcher, event=event, budget=budget,
                   fetched_at=fetched_at)
         for c, cfg in chosen
     ))
-    return Analysis(cards=list(cards), matched=any(cfg for _, cfg in chosen))
+    cards = [card for card, _ in results]
+    pages: list[FetchedPage] = []
+    for _, claim_pages in results:
+        for page in claim_pages:
+            if all(url_hash(page.url) != url_hash(p.url) for p in pages):
+                pages.append(page)
+    report = await _report_for(cards, pages, gateway=gateway, budget=budget)
+    return Analysis(cards=cards, matched=any(cfg for _, cfg in chosen), report=report)
+
+
+async def _report_for(cards: list[dict], pages: list[FetchedPage], *, gateway: Gateway,
+                      budget: Budget) -> dict:
+    if not cards:
+        return build_report([], [], None, NO_CLAIMS_SUMMARY)
+    if not pages:
+        return build_report(cards, [], None, NO_SOURCES_SUMMARY)
+    if not budget.try_reserve(1):  # the cards are already paid for; skip only the written summary
+        return build_report(cards, pages, None)
+    claims = [
+        {
+            "text": card["text"],
+            "supporting": [e["span"] for e in card["evidence"] if e["stance"] == "supports"],
+            "opposing": [e["span"] for e in card["evidence"] if e["stance"] == "contradicts"],
+        }
+        for card in cards
+    ]
+    sources = [{"url": p.url, "excerpt": p.text[:REPORT_EXCERPT_CHARS]} for p in pages]
+    try:
+        return build_report(cards, pages, await gateway.report(claims=claims, sources=sources))
+    except GeminiError:  # a failed summary must not discard the claim cards
+        return build_report(cards, pages, None)

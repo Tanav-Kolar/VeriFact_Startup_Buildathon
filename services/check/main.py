@@ -334,7 +334,7 @@ def content_hash(settings: CheckSettings, inp: CheckInput) -> str:
 
 
 def _public(report: dict) -> dict:
-    return {k: report[k] for k in ("report_id", "claims", "matched_event_id")}
+    return {k: report[k] for k in ("report_id", "claims", "matched_event_id", "report")}
 
 
 # ---------------------------------------------------------------------------- app
@@ -436,6 +436,7 @@ def create_app(
             "report_id": uuid.uuid4().hex,
             "claims": analysis.cards,
             "matched_event_id": event.event_id if analysis.matched else None,
+            "report": analysis.report,
             "input_type": inp.kind,
             "created_at": _utc_iso(clock()),
             "content_hash": digest,
@@ -462,7 +463,8 @@ def create_app(
                 raise CheckError(503, "store_unavailable", "Reports are temporarily unavailable.") from exc
         if report is None:
             raise CheckError(404, "not_found", "No such report.")
-        return JSONResponse({k: report[k] for k in
-                             ("report_id", "claims", "matched_event_id", "input_type", "created_at")})
+        return JSONResponse({k: report.get(k) for k in
+                             ("report_id", "claims", "matched_event_id", "report", "input_type",
+                              "created_at")})
 
     return app

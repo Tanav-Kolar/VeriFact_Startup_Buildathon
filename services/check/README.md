@@ -9,7 +9,7 @@ unverified`, always with counts, and is computed in code from verified evidence.
 
 | Method and path | Body | Returns |
 | --- | --- | --- |
-| `POST /check` | JSON `{"text": "..."}` or `{"url": "..."}`; or multipart with an `image` file | `{report_id, claims: [claim card], matched_event_id}` |
+| `POST /check` | JSON `{"text": "..."}` or `{"url": "..."}`; or multipart with an `image` file | `{report_id, claims: [claim card], matched_event_id, report}` |
 | `GET /check/{report_id}` | | The stored report |
 | `GET /healthz` | | `{"ok": true, "check_enabled": true}` |
 
@@ -34,6 +34,22 @@ unsupported_image | unsupported_url | unreadable_url`, `429 rate_limited | daily
    that is not an exact substring of the fetched page is dropped (P1.2, P7.1).
 
 `self_reported`, `source_type` and `conflict` come from the event config, never from the model.
+
+## The `report` field (legacy shape)
+
+At the project owner's request the response also carries the legacy extension's report:
+`{tag, overall_summary, analyzed_claims: [{claim_text, supporting_evidence, opposing_evidence,
+fact_checking_results, conclusion}], source_credibility_summary: [{url, credibility_score, category,
+flags, reasoning}]}`. It is additive: `claims` is unchanged, so `web/` keeps working.
+
+- Evidence lists are the span-verified evidence; `source` URLs are pages the service fetched.
+- One extra model step writes `tag` (one of True, False, Misleading, Partially True, Unverified),
+  `overall_summary`, each `conclusion` and the credibility notes. Anything outside those sets, an
+  out-of-range index or a score outside 0-100 is discarded or clamped.
+- `fact_checking_results` is always empty (the fact-check database lookup is out of scope).
+- **This deliberately breaks principles P1.4 and P1.5 and overrules `DECISIONS.md` #6** (no verdict
+  tag, no credibility score). It was an explicit decision by the project owner and should be
+  recorded in `project_context/DECISIONS.md`.
 Matching a config claim fills `claim_id`, `storyline_id` (only when a seed storyline has the same
 id), `deep_link` and `matched_event_id`; otherwise they are `null` and the id is `chk-<hash>`.
 Evidence `created_at` is our own fetch time, because a page's publish time is not known.
@@ -61,8 +77,9 @@ service. `1` is right for Cloud Run reached directly. Behind a load balancer or 
 `2`, otherwise every user shares the load balancer's rate-limit bucket. Entries further left are
 written by the client and are ignored. IPv6 clients are limited per /64.
 
-A check costs at most `1 + 2 x 2` model calls (extract, then ground and stance per claim), all
-counted against the daily cap. Identical input is served from a content-hash cache and spends
+A check costs at most `1 + 2 x 2 + 1` model calls (extract, ground and stance per claim, then one
+report), all counted against the daily cap. If the cap is reached before the report step, the cards
+are still returned with a neutral report. Identical input is served from a content-hash cache and spends
 nothing.
 
 ## Privacy

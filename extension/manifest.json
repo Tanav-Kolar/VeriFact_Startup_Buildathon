@@ -2,8 +2,9 @@
   "manifest_version": 3,
   "name": "VeriFact Check",
   "version": "0.1.0",
-  "description": "Select text, right-click, and see the evidence around a claim, with sources and counts.",
+  "description": "Right-click, drag over any part of a page, and get a report on the claims in it.",
   "minimum_chrome_version": "110",
+  "icons": { "128": "icons/icon.png" },
   "permissions": ["contextMenus", "storage", "scripting", "activeTab"],
   "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
   "background": {

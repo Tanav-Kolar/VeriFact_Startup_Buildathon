@@ -21,9 +21,11 @@ from services.check.fetch import FetchedPage, FetchError, HttpFetcher, html_to_t
 from services.check.gemini import SYSTEM_EXTRACT, GeminiError, GeminiGateway, wrap_untrusted
 from services.check.main import CheckSettings, DailyBudget, MemoryStore, RateLimiter, create_app
 from services.check.pipeline import (
+    NO_CONCLUSION,
     PERSON_NOTICE,
     Extraction,
     GroundedSource,
+    ReportOut,
     StanceOut,
     evidence_status,
     looks_like_person_assessment,
@@ -54,7 +56,8 @@ class FakeGateway:
     def __init__(self, scenario: dict, *, error: Exception | None = None) -> None:
         self.scenario = scenario
         self.error = error
-        self.calls = {"extract": 0, "ground": 0, "stances": 0}
+        self.calls = {"extract": 0, "ground": 0, "stances": 0, "report": 0}
+        self.report_error: Exception | None = None
         self.last_extract_text: str | None = None
         self.last_extract_image: tuple[bytes, str] | None = None
 
@@ -72,6 +75,14 @@ class FakeGateway:
     async def stances(self, claim_text: str, pages: list[str]) -> list[StanceOut]:
         self.calls["stances"] += 1
         return [StanceOut.model_validate(s) for s in self.scenario["stances"]]
+
+    async def report(self, *, claims, sources) -> ReportOut:
+        self.calls["report"] += 1
+        self.last_report_input = (claims, sources)
+        if self.report_error:
+            raise self.report_error
+        return ReportOut.model_validate(self.scenario.get("report") or {
+            "tag": "Unverified", "overall_summary": "synthetic summary"})
 
 
 class FakeFetcher:
@@ -269,7 +280,7 @@ def test_matched_claim_card(events_dir, name):
     resp = client.post("/check", json={"text": scenario["input_text"]})
     assert resp.status_code == 200
     body = resp.json()
-    assert set(body) == {"report_id", "claims", "matched_event_id"}
+    assert set(body) == {"report_id", "claims", "matched_event_id", "report"}
     assert body["matched_event_id"] == "test-event" and body["report_id"]
 
     card = body["claims"][0]
@@ -407,8 +418,8 @@ def test_report_round_trip_stores_no_identity(events_dir):
     assert fetched.status_code == 200
     assert fetched.json()["claims"] == posted["claims"]
     stored = store.reports[posted["report_id"]]
-    assert set(stored) == {"report_id", "claims", "matched_event_id", "input_type", "created_at",
-                           "content_hash"}
+    assert set(stored) == {"report_id", "claims", "matched_event_id", "report", "input_type",
+                           "created_at", "content_hash"}
     assert stored["input_type"] == "text"
     dump = json.dumps(stored)
     assert "198.51.100.77" not in dump and "testclient" not in dump
@@ -499,10 +510,10 @@ def test_extension_never_parses_markup():
             assert token not in source, f"{path.name} uses {token}"
 
 
-def test_extension_sends_only_the_selection_and_no_identity():
+def test_extension_sends_only_the_cropped_image_and_no_identity():
     source = (EXTENSION / "background.js").read_text()
-    assert 'credentials: "omit"' in source and "JSON.stringify({ text })" in source
-    assert "tab.url" not in source and "pageUrl" not in source
+    assert 'credentials: "omit"' in source and 'formData.append("image"' in source
+    assert 'append("text"' not in source and "tab.url" not in source and "pageUrl" not in source
     assert "https://" not in source.replace("https:", "")  # no hardcoded service address
 
 
@@ -787,3 +798,119 @@ def test_extension_address_helpers():
         )
         out = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True).stdout
         assert json.loads(out) == expected, name
+
+
+# ------------------------------------------------- legacy-shaped report (user-approved)
+
+REPORT_KEYS = {"tag", "overall_summary", "analyzed_claims", "source_credibility_summary"}
+ANALYSED_KEYS = {"claim_text", "supporting_evidence", "opposing_evidence", "fact_checking_results",
+                 "conclusion"}
+OFFICIAL = "https://official.example.test/blog/launch"
+STORY_ONE = "https://news.example.test/story-one"
+STORY_TWO = "https://news.example.test/story-two"
+
+
+def _report(events_dir, scenario):
+    client, gateway, *_ = make_client(events_dir, scenario)
+    body = client.post("/check", json={"text": SCENARIOS[scenario]["input_text"]}).json()
+    return body, gateway
+
+
+def test_report_has_the_legacy_shape_and_only_verified_content(events_dir):
+    body, _ = _report(events_dir, "mixed_with_conflict")
+    report = body["report"]
+    assert set(report) == REPORT_KEYS
+    assert report["tag"] == "Partially True" and report["overall_summary"].startswith("Synthetic")
+    claim = report["analyzed_claims"][0]
+    assert set(claim) == ANALYSED_KEYS
+    assert claim["claim_text"] == EVENT["event"]["claims_to_check"][0]["text"]
+    assert [e["source"] for e in claim["supporting_evidence"]] == [STORY_ONE]
+    assert [e["source"] for e in claim["opposing_evidence"]] == [OFFICIAL, STORY_TWO]
+    for item in claim["supporting_evidence"] + claim["opposing_evidence"]:
+        assert set(item) == {"summary", "source"}
+        assert item["summary"] in PAGES[item["source"]]  # the verified span, not model prose
+    assert claim["fact_checking_results"] == []
+    assert claim["conclusion"].startswith("Synthetic conclusion")
+
+
+def test_report_sources_are_fetched_pages_with_clamped_scores(events_dir):
+    body, _ = _report(events_dir, "mixed_with_conflict")
+    sources = body["report"]["source_credibility_summary"]
+    assert [s["url"] for s in sources] == [OFFICIAL, STORY_ONE, STORY_TWO]  # index 9 was dropped
+    for source in sources:
+        assert set(source) == {"url", "credibility_score", "category", "flags", "reasoning"}
+        assert 0 <= source["credibility_score"] <= 100 and isinstance(source["flags"], list)
+
+
+def test_report_discards_invalid_model_output(events_dir):
+    body, _ = _report(events_dir, "report_invalid")
+    report = body["report"]
+    assert report["tag"] == "Unverified"  # not one of the five allowed labels
+    assert report["analyzed_claims"][0]["conclusion"] == NO_CONCLUSION  # index 5 is out of range
+    sources = report["source_credibility_summary"]
+    assert [(s["url"], s["credibility_score"]) for s in sources] == [(OFFICIAL, 100)]  # clamped; bad ones gone
+
+
+def test_report_step_failure_keeps_the_claim_cards(events_dir):
+    scenario = SCENARIOS["mixed_with_conflict"]
+    gateway = FakeGateway(scenario)
+    gateway.report_error = GeminiError("report model unavailable")
+    app = create_app(make_settings(events_dir), gateway=gateway, fetcher=FakeFetcher(PAGES),
+                     store=MemoryStore())
+    body = TestClient(app).post("/check", json={"text": scenario["input_text"]}).json()
+    assert body["claims"][0]["status"] == "mixed" and len(body["claims"][0]["evidence"]) == 3
+    assert body["report"]["tag"] == "Unverified" and body["report"]["source_credibility_summary"] == []
+
+
+def test_no_claims_gives_a_neutral_report_without_a_model_call(events_dir):
+    body, gateway = _report(events_dir, "claim_text_not_in_input")
+    assert body["claims"] == [] and body["report"]["analyzed_claims"] == []
+    assert body["report"]["tag"] == "Unverified" and gateway.calls["report"] == 0
+
+
+def test_report_model_sees_only_verified_evidence(events_dir):
+    _, gateway = _report(events_dir, "mixed_with_conflict")
+    claims, sources = gateway.last_report_input
+    assert [c["supporting"] for c in claims] == [[
+        "Pat Investor said the hardware purchase was financed with a government grant"]]
+    assert [s["url"] for s in sources] == [OFFICIAL, STORY_ONE, STORY_TWO]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_crop_rect_scales_a_css_pixel_rectangle_onto_the_device_pixel_capture():
+    viewport = {"width": 1000, "height": 800}
+    area = {"x": 10, "y": 20, "width": 100, "height": 50}
+    cases = [
+        # 1x screen: nothing to scale
+        [area, viewport, {"width": 1000, "height": 800}],
+        # 2x Retina: the legacy crop used CSS pixels here and cut the wrong region
+        [area, viewport, {"width": 2000, "height": 1600}],
+        # 3x
+        [{"x": 11, "y": 21, "width": 101, "height": 51}, viewport, {"width": 3000, "height": 2400}],
+        # drawn past the edge: clamped to the capture
+        [{"x": 950, "y": 780, "width": 200, "height": 100}, viewport, {"width": 2000, "height": 1600}],
+        # empty or inverted rectangles are refused
+        [{"x": 5, "y": 5, "width": 0, "height": 10}, viewport, {"width": 1000, "height": 800}],
+        [{"x": 5, "y": 5, "width": -4, "height": 10}, viewport, {"width": 1000, "height": 800}],
+    ]
+    script = (f"const {{cropRect}} = require({json.dumps(str(EXTENSION / 'crop.js'))});"
+              f"console.log(JSON.stringify({json.dumps(cases)}.map(c => cropRect(...c))))")
+    out = json.loads(subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True).stdout)
+    assert out == [
+        {"sx": 10, "sy": 20, "sw": 100, "sh": 50},
+        {"sx": 20, "sy": 40, "sw": 200, "sh": 100},
+        {"sx": 33, "sy": 63, "sw": 303, "sh": 153},
+        {"sx": 1900, "sy": 1560, "sw": 100, "sh": 40},
+        None,
+        None,
+    ]
+
+
+def test_extension_has_the_legacy_snip_flow_pieces():
+    background = (EXTENSION / "background.js").read_text()
+    for token in ("captureVisibleTab", "OffscreenCanvas", "createImageBitmap", "cropRect",
+                  'contexts: ["page", "selection", "image", "video"]'):
+        assert token in background, token
+    snip = (EXTENSION / "snip.js").read_text()
+    assert "crosshair" in snip and "innerWidth" in snip and "Escape" in snip
+    assert (EXTENSION / "icons" / "loading-icon.png").exists()
