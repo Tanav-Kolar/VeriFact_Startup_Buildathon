@@ -1,0 +1,425 @@
+{
+  "synthetic": true,
+  "config": {
+    "event_id": "synthetic-cloud-launch",
+    "name": "Synthetic Cloud Launch",
+    "t0": {
+      "utc": "2026-11-16T12:00:00Z",
+      "source_url": "https://x.com/OfficialOrg/status/1000"
+    },
+    "window": {
+      "pre_hours": 2,
+      "post_hours": 10,
+      "live": false
+    },
+    "official": {
+      "accounts": [
+        "OfficialOrg"
+      ],
+      "posts": [
+        "1000"
+      ],
+      "urls": [
+        "https://official.example.com/blog/launch"
+      ],
+      "spokespeople": [
+        "Alex Founder"
+      ]
+    },
+    "entities": {
+      "org": {
+        "OfficialOrg": [
+          "Official Org",
+          "@OfficialOrg"
+        ]
+      },
+      "product": {
+        "CloudEngine": [
+          "Cloud Engine"
+        ]
+      },
+      "related": [
+        "OpenModel"
+      ]
+    },
+    "keywords": {
+      "core": [
+        "cloud engine"
+      ],
+      "context": [
+        "inference",
+        "cluster"
+      ],
+      "exclude": []
+    },
+    "languages": [
+      "en",
+      "hi"
+    ],
+    "sources": {
+      "x": {
+        "enabled": true,
+        "max_posts": 500,
+        "thread_ids": [
+          "1000"
+        ]
+      },
+      "hn": {
+        "enabled": true
+      },
+      "youtube": {
+        "enabled": true,
+        "max_videos": 20
+      },
+      "news": {
+        "enabled": true,
+        "gdelt": true,
+        "google_news_rss": true
+      }
+    },
+    "turning_points": {
+      "detect_official_response": true,
+      "manual": [
+        {
+          "id": "response-1",
+          "label": "OfficialOrg statement on private hardware",
+          "at_utc": "2026-11-16T16:00:00Z",
+          "confirmed": false,
+          "form": "press_statement"
+        }
+      ]
+    },
+    "seed_storylines": [
+      {
+        "id": "official-benchmarks",
+        "name": "Official performance and pricing claims",
+        "seeds": [
+          "CloudEngine delivers 5x throughput at lower cost"
+        ]
+      },
+      {
+        "id": "public-hardware-grants",
+        "name": "Questions about public hardware grants",
+        "seeds": [
+          "Does CloudEngine run on public grant hardware?"
+        ]
+      }
+    ],
+    "claims_to_check": [
+      {
+        "id": "claim-private-hardware",
+        "text": "CloudEngine runs on privately financed hardware"
+      },
+      {
+        "id": "claim-five-x-speed",
+        "text": "CloudEngine is 5x faster on first token latency"
+      }
+    ],
+    "conflicts_of_interest": [
+      {
+        "person": "Jordan Investor",
+        "relationship": "Partner at Horizon Ventures, an investor in OfficialOrg"
+      }
+    ],
+    "known_coverage": [
+      "TechChronicle"
+    ],
+    "privacy": {
+      "min_followers_to_name": 50000
+    }
+  },
+  "account_map": [
+    {
+      "event_id": "synthetic-cloud-launch",
+      "platform": "x",
+      "author_ref": "OfficialOrg",
+      "account_n": 1,
+      "first_seen": "2026-11-16T12:00:00Z"
+    },
+    {
+      "event_id": "synthetic-cloud-launch",
+      "platform": "x",
+      "author_ref": "user_private_99",
+      "account_n": 2,
+      "first_seen": "2026-11-16T13:10:00Z"
+    },
+    {
+      "event_id": "synthetic-cloud-launch",
+      "platform": "x",
+      "author_ref": "Jordan Investor",
+      "account_n": 3,
+      "first_seen": "2026-11-16T14:20:00Z"
+    },
+    {
+      "event_id": "synthetic-cloud-launch",
+      "platform": "hn",
+      "author_ref": "hn_curious_dev",
+      "account_n": 4,
+      "first_seen": "2026-11-16T15:05:00Z"
+    }
+  ],
+  "items": [
+    {
+      "item_id": "x:1000",
+      "event_id": "synthetic-cloud-launch",
+      "platform": "x",
+      "kind": "post",
+      "url": "https://x.com/i/status/1000",
+      "author_ref": "OfficialOrg",
+      "author_followers": 25000,
+      "created_at": "2026-11-16T12:00:00Z",
+      "collected_at": "2026-11-16T12:01:00Z",
+      "text": "Launching CloudEngine today! CloudEngine is 5x faster on first token latency across all tiers.",
+      "lang": "en",
+      "parent_id": null,
+      "quote_of": null,
+      "links": [],
+      "engagement": {
+        "likes": 120,
+        "reposts": 40,
+        "replies": 15,
+        "views": 5000,
+        "score": null
+      },
+      "captured_by": "backfill",
+      "time_approximate": false
+    },
+    {
+      "item_id": "x:1001",
+      "event_id": "synthetic-cloud-launch",
+      "platform": "x",
+      "kind": "reply",
+      "url": "https://x.com/i/status/1001",
+      "author_ref": "user_private_99",
+      "author_followers": 450,
+      "created_at": "2026-11-16T13:10:00Z",
+      "collected_at": "2026-11-16T13:12:00Z",
+      "text": "Wait, isn't this cluster running on public grant hardware rather than private clusters?",
+      "lang": "en",
+      "parent_id": "x:1000",
+      "quote_of": null,
+      "links": [],
+      "engagement": {
+        "likes": 85,
+        "reposts": 20,
+        "replies": 10,
+        "views": 3200,
+        "score": null
+      },
+      "captured_by": "backfill",
+      "time_approximate": false
+    },
+    {
+      "item_id": "x:1002",
+      "event_id": "synthetic-cloud-launch",
+      "platform": "x",
+      "kind": "quote",
+      "url": "https://x.com/i/status/1002",
+      "author_ref": "Jordan Investor",
+      "author_followers": 18000,
+      "created_at": "2026-11-16T14:20:00Z",
+      "collected_at": "2026-11-16T14:22:00Z",
+      "text": "Great launch! The team confirmed the cluster uses privately leased commercial nodes.",
+      "lang": "en",
+      "parent_id": null,
+      "quote_of": "x:1000",
+      "links": [],
+      "engagement": {
+        "likes": 50,
+        "reposts": 12,
+        "replies": 4,
+        "views": 2100,
+        "score": null
+      },
+      "captured_by": "api",
+      "time_approximate": false
+    },
+    {
+      "item_id": "hn:2000",
+      "event_id": "synthetic-cloud-launch",
+      "platform": "hn",
+      "kind": "story",
+      "url": "https://news.ycombinator.com/item?id=2000",
+      "author_ref": "hn_curious_dev",
+      "author_followers": null,
+      "created_at": "2026-11-16T15:05:00Z",
+      "collected_at": "2026-11-16T15:06:00Z",
+      "text": "Show Discussion: Questions around public grant hardware in https://x.com/i/status/1001",
+      "lang": "en",
+      "parent_id": null,
+      "quote_of": null,
+      "links": [
+        "https://x.com/i/status/1001"
+      ],
+      "engagement": {
+        "likes": null,
+        "reposts": null,
+        "replies": 30,
+        "views": null,
+        "score": 110
+      },
+      "captured_by": "api",
+      "time_approximate": false
+    },
+    {
+      "item_id": "gdelt:art3000",
+      "event_id": "synthetic-cloud-launch",
+      "platform": "news",
+      "kind": "article",
+      "url": "https://techchronicle.example.com/cloudengine-hardware",
+      "author_ref": "techchronicle.example.com",
+      "author_followers": null,
+      "created_at": "2026-11-16T16:30:00Z",
+      "collected_at": "2026-11-16T16:35:00Z",
+      "text": "Alex Founder told reporters that CloudEngine runs on privately financed hardware leased directly by the company. "
+      ,
+      "lang": "en",
+      "parent_id": null,
+      "quote_of": null,
+      "links": [],
+      "engagement": {
+        "likes": null,
+        "reposts": null,
+        "replies": null,
+        "views": null,
+        "score": null
+      },
+      "captured_by": "api",
+      "time_approximate": false
+    }
+  ],
+  "enrichments": [
+    {
+      "item_id": "x:1000",
+      "event_id": "synthetic-cloud-launch",
+      "enriched_at": "2026-11-16T12:02:00Z",
+      "model_id": "gemini-2.5-flash-lite",
+      "embedding_model_id": "gemini-embedding-001",
+      "prompt_version": "v1",
+      "lang": "en",
+      "storyline_id": "official-benchmarks",
+      "storyline_similarity": 0.88,
+      "off_topic": false,
+      "claims": [
+        {
+          "claim_id": "claim-five-x-speed",
+          "stance": "supports",
+          "evidence_span": "CloudEngine is 5x faster on first token latency",
+          "votes": [
+            "supports",
+            "supports",
+            "supports"
+          ],
+          "agreement": 1.0
+        }
+      ],
+      "entities": [
+        "CloudEngine"
+      ],
+      "is_official": true,
+      "conflict_person": null
+    },
+    {
+      "item_id": "x:1001",
+      "event_id": "synthetic-cloud-launch",
+      "enriched_at": "2026-11-16T13:13:00Z",
+      "model_id": "gemini-2.5-flash-lite",
+      "embedding_model_id": "gemini-embedding-001",
+      "prompt_version": "v1",
+      "lang": "en",
+      "storyline_id": "public-hardware-grants",
+      "storyline_similarity": 0.82,
+      "off_topic": false,
+      "claims": [
+        {
+          "claim_id": "claim-private-hardware",
+          "stance": "contradicts",
+          "evidence_span": "running on public grant hardware rather than private clusters",
+          "votes": [
+            "contradicts",
+            "contradicts",
+            "contradicts"
+          ],
+          "agreement": 1.0
+        }
+      ],
+      "entities": [],
+      "is_official": false,
+      "conflict_person": null
+    },
+    {
+      "item_id": "x:1002",
+      "event_id": "synthetic-cloud-launch",
+      "enriched_at": "2026-11-16T14:23:00Z",
+      "model_id": "gemini-2.5-flash-lite",
+      "embedding_model_id": "gemini-embedding-001",
+      "prompt_version": "v1",
+      "lang": "en",
+      "storyline_id": "public-hardware-grants",
+      "storyline_similarity": 0.79,
+      "off_topic": false,
+      "claims": [
+        {
+          "claim_id": "claim-private-hardware",
+          "stance": "supports",
+          "evidence_span": "the cluster uses privately leased commercial nodes",
+          "votes": [
+            "supports",
+            "supports",
+            "neutral"
+          ],
+          "agreement": 0.67
+        }
+      ],
+      "entities": [],
+      "is_official": false,
+      "conflict_person": "Jordan Investor"
+    },
+    {
+      "item_id": "hn:2000",
+      "event_id": "synthetic-cloud-launch",
+      "enriched_at": "2026-11-16T15:07:00Z",
+      "model_id": "gemini-2.5-flash-lite",
+      "embedding_model_id": "gemini-embedding-001",
+      "prompt_version": "v1",
+      "lang": "en",
+      "storyline_id": "public-hardware-grants",
+      "storyline_similarity": 0.76,
+      "off_topic": false,
+      "claims": [],
+      "entities": [],
+      "is_official": false,
+      "conflict_person": null
+    },
+    {
+      "item_id": "gdelt:art3000",
+      "event_id": "synthetic-cloud-launch",
+      "enriched_at": "2026-11-16T16:36:00Z",
+      "model_id": "gemini-2.5-flash-lite",
+      "embedding_model_id": "gemini-embedding-001",
+      "prompt_version": "v1",
+      "lang": "en",
+      "storyline_id": "public-hardware-grants",
+      "storyline_similarity": 0.85,
+      "off_topic": false,
+      "claims": [
+        {
+          "claim_id": "claim-private-hardware",
+          "stance": "supports",
+          "evidence_span": "CloudEngine runs on privately financed hardware",
+          "votes": [
+            "supports",
+            "supports",
+            "supports"
+          ],
+          "agreement": 1.0
+        }
+      ],
+      "entities": [
+        "CloudEngine"
+      ],
+      "is_official": true,
+      "conflict_person": null
+    }
+  ]
+}

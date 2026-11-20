@@ -60,6 +60,11 @@ create_table_from_schema \
   "${SCRIPT_DIR}/account_map.json" \
   --clustering_fields=event_id,platform
 
+create_table_from_schema \
+  "frames" \
+  "${SCRIPT_DIR}/frames.json" \
+  --clustering_fields=event_id,hour
+
 # 4. Create event_t0 table if missing and upsert configured events' T0 timestamps
 if ! bq --project_id="${GCP_PROJECT}" show "${GCP_PROJECT}:${BQ_DATASET}.event_t0" >/dev/null 2>&1; then
   bq --project_id="${GCP_PROJECT}" --location="${GCP_REGION}" mk \

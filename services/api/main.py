@@ -1,8 +1,13 @@
-"""VeriFact API service: minimal read-only FastAPI application.
+"""VeriFact API service: read-only FastAPI application.
 
-Provides event configuration, storylines, claim cards, trust metrics,
-and before/after views driven entirely by event configs from EVENTS_DIR.
+Serves event configuration, frames, storylines, item detail, claim cards,
+neutral timing signals, before/after comparisons, grounded briefs, trust
+metrics, and SSE live updates. Supports ``GRAPH_BACKEND=frames`` (local
+``FRAMES_DIR`` JSON snapshots or BigQuery) and ``GRAPH_BACKEND=spanner``
+(when ``SPANNER_LIVE=true``) with identical response shapes.
 """
+
+from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
@@ -17,8 +22,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sse_starlette.sse import EventSourceResponse
+from sse_starlette.sse import EventSourceResponse, ServerSentEvent
 import yaml
+
+from services.api.store import (
+    DESCRIPTIVE_COMPARISON_NOTE,
+    DataStore,
+    FramesStore,
+    SpannerStore,
+    compute_now_hour,
+    format_utc,
+)
 
 # ---------------------------------------------------------------------------
 # Structured JSON Logging
@@ -42,14 +56,14 @@ class JSONFormatter(logging.Formatter):
 
 def configure_logging(level: str = "INFO") -> logging.Logger:
     """Configures structured JSON logging on stdout."""
-    logger = logging.getLogger("verifact.api")
-    logger.setLevel(level.upper())
-    if not logger.handlers:
+    log = logging.getLogger("verifact.api")
+    log.setLevel(level.upper())
+    if not log.handlers:
         handler = logging.StreamHandler(sys.stdout)
         handler.setFormatter(JSONFormatter())
-        logger.addHandler(handler)
-        logger.propagate = False
-    return logger
+        log.addHandler(handler)
+        log.propagate = False
+    return log
 
 
 logger = configure_logging()
@@ -70,7 +84,12 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173"
     graph_backend: str = "frames"
+    spanner_live: bool = False
+    live_ingestion: bool = False
     events_dir: str = "events"
+    frames_dir: str | None = None
+    gcp_project: str = ""
+    bq_dataset: str = "verifact"
     log_level: str = "INFO"
     sse_heartbeat_seconds: float = 15.0
 
@@ -116,6 +135,14 @@ class EventDetailResponse(BaseModel):
     now_hour: int
 
 
+class FrameResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    hour: int
+    nodes_added: list[dict[str, Any]] = Field(default_factory=list)
+    edges_added: list[dict[str, Any]] = Field(default_factory=list)
+    storyline_counts: dict[str, int] = Field(default_factory=dict)
+
+
 class StorylineItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
     id: str
@@ -132,6 +159,33 @@ class StorylineItem(BaseModel):
 class StorylineDetailResponse(StorylineItem):
     volume_by_hour: list[dict[str, Any]] = Field(default_factory=list)
     jumps: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ItemClaimLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    claim_id: str
+    stance: str
+    span: str
+
+
+class ItemDetailResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    item_id: str
+    created_at: str
+    collected_at: str
+    collection_lag_s: int | None = None
+    platform: str
+    url: str | None = None
+    excerpt: str
+    storyline_id: str | None = None
+    claims: list[ItemClaimLink] = Field(default_factory=list)
+    reach: int | None = None
+    tags: list[str] = Field(default_factory=list)
+    is_official: bool = False
+    self_reported: bool = False
+    conflict: dict[str, str] | None = None
+    lang: str | None = None
+    label: str | None = None
 
 
 class ClaimCounts(BaseModel):
@@ -154,6 +208,14 @@ class ClaimCardResponse(BaseModel):
     deep_link: str | None = None
 
 
+class TimingSignalResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    storyline_id: str
+    n_items: int
+    window_minutes: int
+    text: str
+
+
 class StorylineBeforeAfter(BaseModel):
     model_config = ConfigDict(extra="forbid")
     storyline_id: str
@@ -169,8 +231,38 @@ class BeforeAfterResponse(BaseModel):
     turning_point: TurningPointDetail
     confirmed: bool = False
     form: str | None = None
-    note: str = "Descriptive comparison, not a causal estimate."
+    note: str = DESCRIPTIVE_COMPARISON_NOTE
     storylines: list[StorylineBeforeAfter]
+
+
+class BriefSummarySentence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    text: str
+    item_ids: list[str] = Field(default_factory=list)
+
+
+class BriefStorylineRow(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    id: str
+    name: str
+    volume: int | None = None
+    origin_and_spread: str = ""
+    after_response: str = ""
+    top_amplifier: str | None = None
+
+
+class BriefResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    summary: list[BriefSummarySentence] = Field(default_factory=list)
+    storylines: list[BriefStorylineRow] = Field(default_factory=list)
+    claims: list[ClaimCardResponse] = Field(default_factory=list)
+    watch: list[str] = Field(default_factory=list)
+    evidence_to_cite: list[BriefSummarySentence] = Field(default_factory=list)
+    method_and_limits: str
+    coverage: dict[str, Any] = Field(default_factory=dict)
+    generated_at: str | None = None
+    model_id: str | None = None
+    prompt_version: str | None = None
 
 
 class TrustResponse(BaseModel):
@@ -187,10 +279,7 @@ class TrustResponse(BaseModel):
 
 
 def load_event_file(path: Path) -> dict[str, Any] | None:
-    """Loads an event config file.
-
-    Attempts to use verifact_core.config.load_event, falling back cleanly to yaml.safe_load.
-    """
+    """Loads an event config file via verifact_core.config.load_event with PyYAML fallback."""
     try:
         from verifact_core.config import load_event
 
@@ -198,18 +287,22 @@ def load_event_file(path: Path) -> dict[str, Any] | None:
         if hasattr(cfg, "model_dump"):
             return cfg.model_dump()
         return dict(cfg)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001
         logger.debug(
-            json.dumps({"msg": "Falling back to PyYAML safe_load", "path": str(path), "error": str(exc)})
+            json.dumps(
+                {"msg": "Falling back to PyYAML safe_load", "path": str(path), "error": str(exc)}
+            )
         )
         try:
             with open(path, "r", encoding="utf-8") as f:
                 content = yaml.safe_load(f)
                 if isinstance(content, dict):
                     return content
-        except Exception as read_err:
+        except Exception as read_err:  # noqa: BLE001
             logger.warning(
-                json.dumps({"msg": "Could not parse YAML file", "path": str(path), "error": str(read_err)})
+                json.dumps(
+                    {"msg": "Could not parse YAML file", "path": str(path), "error": str(read_err)}
+                )
             )
     return None
 
@@ -231,11 +324,7 @@ def get_all_events(events_dir: Path) -> list[tuple[str, dict[str, Any], Path]]:
 
 def find_event(events_dir: Path, event_id: str) -> tuple[dict[str, Any], Path] | None:
     """Finds a specific event by event_id or filename stem."""
-    direct_candidates = [
-        events_dir / f"{event_id}.yaml",
-        events_dir / f"{event_id}.yml",
-    ]
-    for candidate in direct_candidates:
+    for candidate in (events_dir / f"{event_id}.yaml", events_dir / f"{event_id}.yml"):
         if candidate.is_file():
             data = load_event_file(candidate)
             if data:
@@ -249,25 +338,24 @@ def find_event(events_dir: Path, event_id: str) -> tuple[dict[str, Any], Path] |
 
 def format_datetime_utc(val: Any) -> str:
     """Formats a datetime or string representation into ISO 8601 UTC with trailing Z."""
-    if isinstance(val, datetime):
-        return val.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    if val is None:
-        return ""
-    val_str = str(val).strip()
-    if val_str.endswith("+00:00"):
-        return val_str[:-6] + "Z"
-    return val_str
+    return format_utc(val)
 
 
 def calculate_now_hour(t0_utc_str: str) -> int:
     """Calculates hours from t0 until now in UTC."""
-    try:
-        t0_clean = t0_utc_str.replace("Z", "+00:00")
-        t0_dt = datetime.fromisoformat(t0_clean)
-        now_dt = datetime.now(timezone.utc)
-        return int((now_dt - t0_dt).total_seconds() // 3600)
-    except Exception:
-        return 0
+    return compute_now_hour(t0_utc_str)
+
+
+def build_data_store(settings: Settings) -> DataStore:
+    """Build the active DataStore respecting GRAPH_BACKEND and SPANNER_LIVE switch."""
+    frames_store = FramesStore(
+        frames_dir=settings.frames_dir,
+        gcp_project=settings.gcp_project,
+        bq_dataset=settings.bq_dataset,
+    )
+    if settings.graph_backend.strip().lower() == "spanner" and settings.spanner_live:
+        return SpannerStore(fallback_store=frames_store)
+    return frames_store
 
 
 # ---------------------------------------------------------------------------
@@ -275,18 +363,21 @@ def calculate_now_hour(t0_utc_str: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    store: DataStore | None = None,
+) -> FastAPI:
     """Creates and configures the FastAPI application instance."""
     app_settings = settings or Settings()
     configure_logging(app_settings.log_level)
+    active_store: DataStore = store if store is not None else build_data_store(app_settings)
 
     app = FastAPI(
         title="VeriFact API",
-        description="Read-only API for narrative intelligence graph and verification data",
-        version="0.1.0",
+        description="Read-only API for narrative intelligence graph and evidence data",
+        version="0.2.0",
     )
 
-    # CORS configuration
     app.add_middleware(
         CORSMiddleware,
         allow_origins=app_settings.cors_origins_list,
@@ -295,7 +386,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Standardized error responses
     @app.exception_handler(HTTPException)
     async def http_exception_handler(_: Request, exc: HTTPException) -> JSONResponse:
         code = "not_found" if exc.status_code == status.HTTP_404_NOT_FOUND else "http_error"
@@ -327,7 +417,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/healthz", response_model=HealthResponse)
     async def healthz() -> HealthResponse:
-        return HealthResponse(ok=True, graph_backend=app_settings.graph_backend)
+        return HealthResponse(ok=True, graph_backend=active_store.backend_name)
 
     @app.get("/events", response_model=list[EventSummary])
     async def list_events() -> list[EventSummary]:
@@ -337,8 +427,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name = data.get("name") or eid
             t0 = data.get("t0", {})
             t0_raw = t0.get("utc") if isinstance(t0, dict) else t0
-            t0_utc = format_datetime_utc(t0_raw)
-            results.append(EventSummary(event_id=eid, name=name, t0_utc=t0_utc))
+            results.append(EventSummary(event_id=eid, name=name, t0_utc=format_datetime_utc(t0_raw)))
         return results
 
     @app.get("/events/{event_id}", response_model=EventDetailResponse)
@@ -349,7 +438,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         t0_raw = t0.get("utc") if isinstance(t0, dict) else t0
         t0_utc = format_datetime_utc(t0_raw)
 
-        # Enabled sources list
         raw_sources = data.get("sources", {})
         enabled_sources: list[str] = []
         if isinstance(raw_sources, dict):
@@ -359,7 +447,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         elif isinstance(raw_sources, list):
             enabled_sources = raw_sources
 
-        # Turning points
         tp_raw = data.get("turning_points", {})
         manual_tp: list[dict[str, Any]] = []
         if isinstance(tp_raw, dict):
@@ -379,69 +466,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             if isinstance(tp, dict)
         ]
 
-        now_hour = calculate_now_hour(t0_utc)
-
         return EventDetailResponse(
             name=name,
             t0_utc=t0_utc,
             config_file=str(path),
             sources=enabled_sources,
             turning_points=turning_points,
-            now_hour=now_hour,
+            now_hour=calculate_now_hour(t0_utc),
         )
 
-    @app.get("/events/{event_id}/frames")
+    @app.get("/events/{event_id}/frames", response_model=list[FrameResponse])
     async def get_frames(
         event_id: str,
         from_hour: int | None = Query(default=None),
         to_hour: int | None = Query(default=None),
     ) -> list[dict[str, Any]]:
-        # Validate event exists
-        get_event_or_404(event_id)
-        # In MVP, frames are returned when available; never invent nodes or counts
-        return []
+        data, _ = get_event_or_404(event_id)
+        return active_store.get_frames(event_id, data, from_hour=from_hour, to_hour=to_hour)
 
     @app.get("/events/{event_id}/storylines", response_model=list[StorylineItem])
     async def get_storylines(
         event_id: str,
         at_hour: int | None = Query(default=None),
-    ) -> list[StorylineItem]:
+    ) -> list[dict[str, Any]]:
         data, _ = get_event_or_404(event_id)
-        seed_storylines = data.get("seed_storylines", []) or []
-
-        storylines: list[StorylineItem] = []
-        if isinstance(seed_storylines, list):
-            for idx, item in enumerate(seed_storylines):
-                if isinstance(item, dict):
-                    storylines.append(
-                        StorylineItem(
-                            id=item.get("id", f"storyline-{idx}"),
-                            name=item.get("name", f"Storyline {idx}"),
-                            colour_index=idx,
-                            count=0,
-                            first_seen=None,
-                            platforms_reached=[],
-                            stance_mix=None,
-                            agreement=None,
-                            top_amplifiers=[],
-                        )
-                    )
-
-        # Append standard unassigned row
-        storylines.append(
-            StorylineItem(
-                id="unassigned",
-                name="Unassigned",
-                colour_index=-1,
-                count=0,
-                first_seen=None,
-                platforms_reached=[],
-                stance_mix=None,
-                agreement=None,
-                top_amplifiers=[],
-            )
-        )
-        return storylines
+        return active_store.get_storylines(event_id, data, at_hour=at_hour)
 
     @app.get(
         "/events/{event_id}/storylines/{storyline_id}",
@@ -451,44 +500,26 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         event_id: str,
         storyline_id: str,
         at_hour: int | None = Query(default=None),
-    ) -> StorylineDetailResponse:
+    ) -> dict[str, Any]:
         data, _ = get_event_or_404(event_id)
-        if storyline_id == "unassigned":
-            return StorylineDetailResponse(
-                id="unassigned",
-                name="Unassigned",
-                colour_index=-1,
-                count=0,
-                first_seen=None,
-                platforms_reached=[],
-                stance_mix=None,
-                agreement=None,
-                top_amplifiers=[],
-                volume_by_hour=[],
-                jumps=[],
+        detail = active_store.get_storyline_detail(event_id, data, storyline_id, at_hour=at_hour)
+        if detail is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Storyline '{storyline_id}' not found",
             )
+        return detail
 
-        seed_storylines = data.get("seed_storylines", []) or []
-        for idx, item in enumerate(seed_storylines):
-            if isinstance(item, dict) and item.get("id") == storyline_id:
-                return StorylineDetailResponse(
-                    id=item.get("id", storyline_id),
-                    name=item.get("name", storyline_id),
-                    colour_index=idx,
-                    count=0,
-                    first_seen=None,
-                    platforms_reached=[],
-                    stance_mix=None,
-                    agreement=None,
-                    top_amplifiers=[],
-                    volume_by_hour=[],
-                    jumps=[],
-                )
-
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Storyline '{storyline_id}' not found",
-        )
+    @app.get("/events/{event_id}/items/{item_id}", response_model=ItemDetailResponse)
+    async def get_item(event_id: str, item_id: str) -> dict[str, Any]:
+        data, _ = get_event_or_404(event_id)
+        item = active_store.get_item(event_id, data, item_id)
+        if item is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Item '{item_id}' not found",
+            )
+        return item
 
     @app.get(
         "/events/{event_id}/claims/{claim_id}",
@@ -498,36 +529,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         event_id: str,
         claim_id: str,
         at_hour: int | None = Query(default=None),
-    ) -> ClaimCardResponse:
+    ) -> dict[str, Any]:
         data, _ = get_event_or_404(event_id)
+        return active_store.get_claim_card(event_id, data, claim_id, at_hour=at_hour)
 
-        claim_text = f"[{claim_id}]"
-        self_reported = False
-        self_reported_note = None
-        storyline_id = None
-
-        claims_to_check = data.get("claims_to_check", []) or []
-        if isinstance(claims_to_check, list):
-            for c in claims_to_check:
-                if isinstance(c, dict) and c.get("id") == claim_id:
-                    claim_text = c.get("text", claim_text)
-                    self_reported = bool(c.get("self_reported", False))
-                    if self_reported:
-                        self_reported_note = "Company statement, not independently confirmed"
-                    storyline_id = c.get("storyline_id")
-                    break
-
-        return ClaimCardResponse(
-            claim_id=claim_id,
-            text=claim_text,
-            status="unverified",
-            counts=ClaimCounts(supporting=0, contradicting=0, neutral=0),
-            self_reported=self_reported,
-            self_reported_note=self_reported_note,
-            evidence=[],
-            storyline_id=storyline_id,
-            deep_link=f"/e/{event_id}?claim={claim_id}",
-        )
+    @app.get("/events/{event_id}/signals", response_model=list[TimingSignalResponse])
+    async def get_signals(event_id: str) -> list[dict[str, Any]]:
+        data, _ = get_event_or_404(event_id)
+        return active_store.get_signals(event_id, data)
 
     @app.get(
         "/events/{event_id}/before-after",
@@ -536,106 +545,61 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def get_before_after(
         event_id: str,
         turning_point: str | None = Query(default=None),
-    ) -> BeforeAfterResponse:
+    ) -> dict[str, Any]:
         data, _ = get_event_or_404(event_id)
-        tp_raw = data.get("turning_points", {})
-        manual_tp: list[dict[str, Any]] = []
-        if isinstance(tp_raw, dict):
-            manual_tp = tp_raw.get("manual", []) or []
-        elif isinstance(tp_raw, list):
-            manual_tp = tp_raw
+        comparison = active_store.get_before_after(event_id, data, turning_point_id=turning_point)
+        if comparison is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Turning point '{turning_point}' not found",
+            )
+        return comparison
 
-        chosen_tp: dict[str, Any] | None = None
-        if turning_point:
-            for tp in manual_tp:
-                if isinstance(tp, dict) and tp.get("id") == turning_point:
-                    chosen_tp = tp
-                    break
-            if not chosen_tp:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"Turning point '{turning_point}' not found",
-                )
-        else:
-            if manual_tp and isinstance(manual_tp[0], dict):
-                chosen_tp = manual_tp[0]
-            else:
-                chosen_tp = {
-                    "id": "tp-initial",
-                    "label": "Initial event marker",
-                    "at_utc": None,
-                    "confirmed": False,
-                    "form": None,
-                }
-
-        tp_detail = TurningPointDetail(
-            id=chosen_tp.get("id", "tp-unknown"),
-            label=chosen_tp.get("label", ""),
-            at_utc=format_datetime_utc(chosen_tp.get("at_utc")) if chosen_tp.get("at_utc") else None,
-            confirmed=bool(chosen_tp.get("confirmed", False)),
-            form=chosen_tp.get("form"),
-        )
-
-        seed_storylines = data.get("seed_storylines", []) or []
-        storylines: list[StorylineBeforeAfter] = []
-        if isinstance(seed_storylines, list):
-            for s in seed_storylines:
-                if isinstance(s, dict):
-                    storylines.append(
-                        StorylineBeforeAfter(
-                            storyline_id=s.get("id", ""),
-                            name=s.get("name", ""),
-                            volume_before_per_h=0.0,
-                            volume_after_per_h=0.0,
-                            pattern="unchanged",
-                            addressed=False,
-                        )
-                    )
-
-        return BeforeAfterResponse(
-            turning_point=tp_detail,
-            confirmed=tp_detail.confirmed,
-            form=tp_detail.form,
-            note="Descriptive comparison, not a causal estimate.",
-            storylines=storylines,
-        )
+    @app.get("/events/{event_id}/brief", response_model=BriefResponse)
+    async def get_brief(event_id: str) -> dict[str, Any]:
+        data, _ = get_event_or_404(event_id)
+        return active_store.get_brief(event_id, data)
 
     @app.get("/events/{event_id}/trust", response_model=TrustResponse)
-    async def get_trust(event_id: str) -> TrustResponse:
+    async def get_trust(event_id: str) -> dict[str, Any]:
         data, _ = get_event_or_404(event_id)
-        raw_sources = data.get("sources", {})
-        coverage: dict[str, dict[str, Any]] = {}
-
-        if isinstance(raw_sources, dict):
-            for src_name, src_conf in raw_sources.items():
-                if isinstance(src_conf, dict) and src_conf.get("enabled") is True:
-                    cov_entry: dict[str, Any] = {"count": 0}
-                    if "max_posts" in src_conf:
-                        cov_entry["cap"] = src_conf["max_posts"]
-                    elif "max_videos" in src_conf:
-                        cov_entry["cap"] = src_conf["max_videos"]
-                    coverage[src_name] = cov_entry
-
-        return TrustResponse(
-            coverage=coverage,
-            gold=None,
-            unassigned_count=0,
-            backfilled_share=None,
-        )
+        return active_store.get_trust(event_id, data)
 
     @app.get("/events/{event_id}/live")
     async def live_stream(event_id: str, request: Request) -> EventSourceResponse:
         data, _ = get_event_or_404(event_id)
-        is_live = bool(data.get("window", {}).get("live", False))
+        window = data.get("window", {})
+        config_live = bool(window.get("live", False)) if isinstance(window, dict) else False
+        is_live = config_live or app_settings.live_ingestion
 
         async def event_generator():
-            # Send initial live status
             yield {
                 "event": "status",
                 "data": json.dumps({"live": is_live}),
             }
-
-        from sse_starlette.sse import ServerSentEvent
+            if is_live and not await request.is_disconnected():
+                frames = active_store.get_frames(event_id, data)
+                if frames:
+                    latest = frames[-1]
+                    yield {
+                        "event": "storyline_counts",
+                        "data": json.dumps(latest.get("storyline_counts", {})),
+                    }
+                    edges_by_src: dict[str, list[dict[str, Any]]] = {}
+                    for edge in latest.get("edges_added", []):
+                        edges_by_src.setdefault(str(edge.get("source", "")), []).append(edge)
+                    for node in latest.get("nodes_added", []):
+                        if await request.is_disconnected():
+                            break
+                        yield {
+                            "event": "item_added",
+                            "data": json.dumps(
+                                {
+                                    "node": node,
+                                    "edges": edges_by_src.get(str(node.get("id", "")), []),
+                                }
+                            ),
+                        }
 
         def make_heartbeat() -> ServerSentEvent:
             return ServerSentEvent(
@@ -648,19 +612,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             event_generator(),
             ping=ping_interval,
             ping_message_factory=make_heartbeat,
-        )
-
-    @app.get("/events/{event_id}/signals")
-    async def get_signals(event_id: str) -> list[dict[str, Any]]:
-        get_event_or_404(event_id)
-        return []
-
-    @app.get("/events/{event_id}/items/{item_id}")
-    async def get_item(event_id: str, item_id: str) -> dict[str, Any]:
-        get_event_or_404(event_id)
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Item '{item_id}' not found",
         )
 
     return app

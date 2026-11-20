@@ -1,0 +1,48 @@
+{
+  "schema": {
+    "fields": [
+      {
+        "name": "event_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Event slug from the event config"
+      },
+      {
+        "name": "hour",
+        "type": "INT64",
+        "mode": "REQUIRED",
+        "description": "Hours from T0; one row per integer hour from -window.pre_hours to now"
+      },
+      {
+        "name": "built_at",
+        "type": "TIMESTAMP",
+        "mode": "REQUIRED",
+        "description": "UTC timestamp when this frame batch was built"
+      },
+      {
+        "name": "nodes_added",
+        "type": "JSON",
+        "mode": "REQUIRED",
+        "description": "Nodes whose created_at falls in this hour, in the API Node shape"
+      },
+      {
+        "name": "edges_added",
+        "type": "JSON",
+        "mode": "REQUIRED",
+        "description": "Edges whose later endpoint falls in this hour, in the API Edge shape"
+      },
+      {
+        "name": "storyline_counts",
+        "type": "JSON",
+        "mode": "REQUIRED",
+        "description": "Cumulative {storyline_id: count} mapping at the end of this hour"
+      }
+    ]
+  },
+  "clustering": {
+    "fields": [
+      "event_id",
+      "hour"
+    ]
+  }
+}
