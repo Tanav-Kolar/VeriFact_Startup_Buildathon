@@ -90,6 +90,8 @@ class GeminiGateway:
                 if exc.code not in RETRYABLE_CODES or attempt == self._max_retries:
                     raise GeminiError(f"model call failed ({exc.code})") from exc
                 await self._sleep(BASE_BACKOFF_S * 2**attempt)
+            except Exception as exc:  # noqa: BLE001 - transport, auth and timeout errors are not retried
+                raise GeminiError(f"model call failed ({type(exc).__name__})") from exc
         raise GeminiError("model call failed")  # unreachable; keeps the type checker honest
 
     async def extract(

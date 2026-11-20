@@ -237,10 +237,10 @@ async def _card_for(
     fetched = await asyncio.gather(*(fetcher.fetch(s.uri) for s in sources), return_exceptions=True)
     pages: list[FetchedPage] = []
     for result in fetched:
-        if isinstance(result, FetchError):
-            continue
+        if isinstance(result, Exception):
+            continue  # one unreadable source must not sink the whole check
         if isinstance(result, BaseException):
-            raise result
+            raise result  # cancellation still propagates
         if all(url_hash(result.url) != url_hash(p.url) for p in pages):
             pages.append(result)
 

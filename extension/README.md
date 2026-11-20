@@ -11,7 +11,12 @@ evidence with counts, never a verdict.
    deployed `check` service, or `http://127.0.0.1:8081` locally) and the **Web app address**, then
    press **Save**. Chrome asks permission for that one address.
 
-Both addresses start empty. Nothing is hardcoded.
+Both addresses start empty. Nothing is hardcoded. Addresses must be `https://`; `http://` is
+accepted for `localhost` and `127.0.0.1` only, so selected text never travels in clear text to a
+remote host.
+
+If a page does not allow extensions (`chrome://` pages, the PDF viewer, the Web Store), the toolbar
+button shows a `!` for that tab with the reason as its tooltip.
 
 ## What is sent
 

@@ -18,7 +18,8 @@ Person-targeted input ("is @someone a paid shill?") gets no assessment and nothi
 
 Errors are `{"error": {"code", "message"}}`: `413 input_too_large`, `422 invalid_input |
 unsupported_image | unsupported_url | unreadable_url`, `429 rate_limited | daily_cap_reached`,
-`502 upstream_error`, `503 check_disabled`.
+`500 internal_error`, `502 upstream_error`, `503 check_disabled | store_unavailable`,
+`504 timeout`. Every error, including unexpected ones, is JSON and carries the CORS headers.
 
 ## How a check runs
 
@@ -52,7 +53,13 @@ the service refuses to start without them.
 
 Also required: `GCP_PROJECT`, `GCP_REGION`, `GEMINI_MODEL` (Flash-Lite model ID), `EVENT_ID`.
 Optional: `EVENTS_DIR` (default `events`), `CHECK_ENABLED` (default `true`; `false` serves only
-cached checks), `LOG_LEVEL`.
+cached checks), `LOG_LEVEL`, `CHECK_REQUEST_TIMEOUT_S` (default `45`; whole-request deadline, then
+`504`), and `TRUSTED_PROXY_HOPS` (default `1`).
+
+`TRUSTED_PROXY_HOPS` is how many proxies append to `X-Forwarded-For` before a request reaches the
+service. `1` is right for Cloud Run reached directly. Behind a load balancer or custom domain set
+`2`, otherwise every user shares the load balancer's rate-limit bucket. Entries further left are
+written by the client and are ignored. IPv6 clients are limited per /64.
 
 A check costs at most `1 + 2 x 2` model calls (extract, then ground and stance per claim), all
 counted against the daily cap. Identical input is served from a content-hash cache and spends
@@ -79,6 +86,8 @@ Docker builds from the repo root: `docker build -f services/check/Dockerfile .`.
 - The rate limiter, the daily cap and the cache live in one instance, so the real ceilings are
   multiplied by `max-instances`. Keep it small, or move the counters to Firestore.
 - Retries (up to 3 per step) are not counted against the daily cap.
-- DNS is resolved before each fetch, so a rebinding host could slip past the address check.
+- Page fetching resolves a host once and connects to that validated address, refuses compressed
+  responses, caps size and redirects, and has a 15 s deadline per page.
+- The request body is capped while it streams, so chunked uploads are bounded too.
 - No BigQuery access: counts come from web sources found at check time, not from the collected
   graph. Matching a screenshot against collected official posts is not done in v1.

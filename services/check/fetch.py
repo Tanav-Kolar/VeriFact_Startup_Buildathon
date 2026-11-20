@@ -1,8 +1,10 @@
 """Safe page fetching for Check.
 
 Pages are fetched only from public http(s) hosts, never from social platforms (P5.1), with a size
-cap and a hop limit. Every redirect hop is re-validated, so a public URL cannot bounce the service
-onto an internal address. Fetched text is data, never instructions (PRD red-team #1, #10).
+cap, a hop limit and a total deadline. The host is resolved once, validated, and then connected to
+by that exact address, so DNS cannot change its answer between the check and the connection.
+Every redirect hop is validated again. Fetched text is data, never instructions (PRD red-team #1,
+#10).
 """
 
 from __future__ import annotations
@@ -66,6 +68,29 @@ def html_to_text(html: str) -> str:
     return " ".join("".join(parser.parts).split())
 
 
+def url_problem(url: str) -> str | None:
+    """Why a URL must not be fetched ("invalid", "userinfo", "port", "social"), or None.
+
+    The host is read the way the HTTP client reads it (after the last "@", trailing dot removed),
+    so a disguised spelling such as ``x.com.`` or ``a@b@x.com`` cannot dodge the social blocklist.
+    """
+    try:
+        parts = urlsplit(url.strip())
+        host = (parts.hostname or "").rstrip(".").lower()
+        port = parts.port
+    except ValueError:
+        return "invalid"
+    if parts.scheme not in {"http", "https"} or not host:
+        return "invalid"
+    if "@" in parts.netloc:
+        return "userinfo"
+    if port not in {None, 80, 443}:
+        return "port"
+    if is_social_url(f"https://{host}/"):
+        return "social"
+    return None
+
+
 def _default_resolver(host: str) -> list[str]:
     return [info[4][0] for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)]
 
@@ -81,32 +106,29 @@ def is_public_ip(value: str) -> bool:
 class HttpFetcher:
     """Fetches one page as plain text. ``resolver`` and ``transport`` are injectable for tests."""
 
-    # ponytail: DNS is resolved before the request, so a rebinding host could still slip through;
-    # pin the resolved IP in a custom transport if Check ever fetches untrusted hosts at scale.
     def __init__(
         self,
         *,
         timeout: float = 8.0,
+        total_timeout: float = 15.0,
         max_bytes: int = 1_000_000,
         max_redirects: int = 3,
         resolver: Callable[[str], list[str]] | None = None,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self._timeout = timeout
+        self._total_timeout = total_timeout
         self._max_bytes = max_bytes
         self._max_redirects = max_redirects
         self._resolver = resolver or _default_resolver
         self._transport = transport
 
-    async def _guard(self, url: str) -> None:
-        parts = urlsplit(url)
-        host = (parts.hostname or "").lower()
-        if parts.scheme not in {"http", "https"} or not host:
-            raise FetchError("only http(s) URLs are fetched")
-        if parts.port not in {None, 80, 443}:
-            raise FetchError("non-standard port")
-        if is_social_url(url):
-            raise FetchError("social platforms are not fetched")
+    async def _guard(self, url: str) -> tuple[str, str]:
+        """Validate a URL and return (host, the one public address to connect to)."""
+        problem = url_problem(url)
+        if problem:
+            raise FetchError(f"url not allowed: {problem}")
+        host = (urlsplit(url).hostname or "").rstrip(".").lower()
         try:
             addresses = await asyncio.to_thread(self._resolver, host)
             if not addresses or not all(is_public_ip(a) for a in addresses):
@@ -115,39 +137,63 @@ class HttpFetcher:
             raise
         except Exception as exc:  # noqa: BLE001 - resolver failures are all "cannot fetch"
             raise FetchError("host could not be resolved") from exc
+        return host, addresses[0]
 
     async def fetch(self, url: str) -> FetchedPage:
-        current = url
+        """Every failure, including timeouts and malformed URLs, is a FetchError."""
         try:
-            async with httpx.AsyncClient(
-                transport=self._transport,
-                timeout=self._timeout,
-                headers={"User-Agent": "VeriFactCheck/1.0"},
-            ) as client:
-                for _ in range(self._max_redirects + 1):
-                    await self._guard(current)
-                    async with client.stream("GET", current, follow_redirects=False) as response:
-                        if response.is_redirect:
-                            location = response.headers.get("location")
-                            if not location:
-                                raise FetchError("redirect without a location")
-                            current = urljoin(current, location)
-                            continue
-                        if response.status_code != 200:
-                            raise FetchError(f"status {response.status_code}")
-                        kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
-                        if kind not in TEXT_TYPES:
-                            raise FetchError("not a text page")
-                        body = bytearray()
-                        async for chunk in response.aiter_bytes():
-                            body.extend(chunk)
-                            if len(body) >= self._max_bytes:
-                                break
-                        raw = bytes(body[: self._max_bytes]).decode(
-                            response.charset_encoding or "utf-8", errors="replace"
-                        )
-                    text = " ".join(raw.split()) if kind == "text/plain" else html_to_text(raw)
-                    return FetchedPage(url=current, text=text)
-                raise FetchError("too many redirects")
-        except httpx.HTTPError as exc:
-            raise FetchError("request failed") from exc
+            async with asyncio.timeout(self._total_timeout):
+                return await self._fetch(url)
+        except FetchError:
+            raise
+        except (TimeoutError, httpx.HTTPError, httpx.InvalidURL, ValueError, LookupError) as exc:
+            raise FetchError(f"fetch failed ({type(exc).__name__})") from exc
+
+    async def _fetch(self, url: str) -> FetchedPage:
+        current = url
+        async with httpx.AsyncClient(
+            transport=self._transport,
+            timeout=self._timeout,
+            # Ask for no compression: a small compressed body can expand far past max_bytes.
+            headers={"User-Agent": "VeriFactCheck/1.0", "Accept-Encoding": "identity"},
+        ) as client:
+            for _ in range(self._max_redirects + 1):
+                host, address = await self._guard(current)
+                target = httpx.URL(current)
+                request = client.build_request(
+                    "GET",
+                    target.copy_with(host=address),  # connect to the address we validated
+                    headers={"Host": target.netloc.decode("ascii")},
+                    extensions={"sni_hostname": host},  # TLS is still verified against the real host
+                )
+                response = await client.send(request, stream=True, follow_redirects=False)
+                try:
+                    if response.is_redirect:
+                        location = response.headers.get("location")
+                        if not location:
+                            raise FetchError("redirect without a location")
+                        current = urljoin(current, location)
+                        continue
+                    if response.status_code != 200:
+                        raise FetchError(f"status {response.status_code}")
+                    if response.headers.get("content-encoding", "").strip().lower() not in {"", "identity"}:
+                        raise FetchError("compressed response refused")
+                    kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                    if kind not in TEXT_TYPES:
+                        raise FetchError("not a text page")
+                    body = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        body.extend(chunk)
+                        if len(body) >= self._max_bytes:
+                            break
+                    data = bytes(body[: self._max_bytes])
+                    charset = response.charset_encoding or "utf-8"
+                finally:
+                    await response.aclose()
+                try:
+                    raw = data.decode(charset, errors="replace")
+                except LookupError:  # a charset name Python does not know
+                    raw = data.decode("utf-8", errors="replace")
+                text = " ".join(raw.split()) if kind == "text/plain" else html_to_text(raw)
+                return FetchedPage(url=current, text=text)
+            raise FetchError("too many redirects")

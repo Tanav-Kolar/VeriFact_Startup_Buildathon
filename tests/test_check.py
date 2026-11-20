@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -17,7 +18,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from services.check.fetch import FetchedPage, FetchError, HttpFetcher, html_to_text
-from services.check.gemini import SYSTEM_EXTRACT, GeminiError, wrap_untrusted
+from services.check.gemini import SYSTEM_EXTRACT, GeminiError, GeminiGateway, wrap_untrusted
 from services.check.main import CheckSettings, DailyBudget, MemoryStore, RateLimiter, create_app
 from services.check.pipeline import (
     PERSON_NOTICE,
@@ -509,3 +510,280 @@ def test_extension_sends_only_the_selection_and_no_identity():
 def test_extension_scripts_parse():
     for path in EXTENSION.glob("*.js"):
         subprocess.run(["node", "--check", str(path)], check=True, capture_output=True)
+
+
+# ----------------------------------------------------------------- review fixes
+
+
+def _chunks(total: int, size: int = 1024):
+    sent = 0
+    while sent < total:
+        n = min(size, total - sent)
+        sent += n
+        yield b"a" * n
+
+
+def _app(events_dir: Path, *, gateway=None, store=None, **over) -> TestClient:
+    gateway = gateway or FakeGateway(SCENARIOS["official_only_contradicts"])
+    return TestClient(create_app(make_settings(events_dir, **over), gateway=gateway,
+                                 fetcher=FakeFetcher(PAGES), store=store or MemoryStore()))
+
+
+class SlowGateway(FakeGateway):
+    async def extract(self, **kwargs):
+        await asyncio.sleep(5)
+        return await super().extract(**kwargs)
+
+
+class BrokenStore(MemoryStore):
+    def get(self, report_id):
+        raise RuntimeError("firestore is down")
+
+
+class FlakyFetcher(FakeFetcher):
+    async def fetch(self, url: str) -> FetchedPage:
+        if url.endswith("story-one"):
+            raise ValueError("unexpected failure in one source")
+        return await super().fetch(url)
+
+
+# 1. SSRF: connect to the address that was validated (no second DNS lookup)
+
+
+def test_fetcher_connects_to_the_validated_address():
+    seen, lookups = [], []
+
+    def resolver(host):
+        lookups.append(host)
+        return ["93.184.216.34"] if len(lookups) == 1 else ["10.0.0.5"]
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, headers={"content-type": "text/plain"}, text="ok")
+
+    page = asyncio.run(HttpFetcher(transport=httpx.MockTransport(handler), resolver=resolver)
+                       .fetch("https://news.example.test/a"))
+    request = seen[0]
+    assert request.url.host == "93.184.216.34" and request.headers["host"] == "news.example.test"
+    assert request.extensions["sni_hostname"] == "news.example.test"
+    assert len(lookups) == 1 and page.url == "https://news.example.test/a"
+
+
+def test_fetcher_connects_to_a_validated_ipv6_address():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, headers={"content-type": "text/plain"}, text="ok")
+
+    fetcher = HttpFetcher(transport=httpx.MockTransport(handler),
+                          resolver=lambda host: ["2606:2800:220:1:248:1893:25c8:1946"])
+    asyncio.run(fetcher.fetch("https://news.example.test/a"))
+    assert seen[0].url.host == "2606:2800:220:1:248:1893:25c8:1946"
+
+
+# 4. every fetch failure is a FetchError, and one bad source does not sink the check
+
+
+def test_fetcher_turns_bad_ports_and_charsets_into_fetch_errors_or_text():
+    hosts = {"news.example.test": ["93.184.216.34"]}
+    redirect = _fetcher(lambda r: httpx.Response(302, headers={"location": "http://news.example.test:99999/"}),
+                        hosts)
+    with pytest.raises(FetchError):
+        asyncio.run(redirect.fetch("https://news.example.test/a"))
+
+    def odd_charset(request):
+        return httpx.Response(200, headers={"content-type": "text/html; charset=nonsense"},
+                              content=b"<p>Hi</p>")
+
+    assert asyncio.run(_fetcher(odd_charset, hosts).fetch("https://news.example.test/a")).text == "Hi"
+
+
+def test_one_failing_source_does_not_fail_the_check(events_dir):
+    scenario = {
+        "extraction": SCENARIOS["official_only_contradicts"]["extraction"],
+        "grounded_uris": list(PAGES),
+        "stances": [
+            {"index": 0, "stance": "contradicts",
+             "span": "The Widget Factory hardware is privately funded by the company"},
+            {"index": 1, "stance": "contradicts",
+             "span": "the hardware was bought with the company's own money"},
+        ],
+    }
+    app = create_app(make_settings(events_dir), gateway=FakeGateway(scenario),
+                     fetcher=FlakyFetcher(PAGES), store=MemoryStore())
+    resp = TestClient(app).post("/check", json={"text": "The Widget Factory runs on subsidised hardware."})
+    assert resp.status_code == 200
+    urls = [e["url"] for e in resp.json()["claims"][0]["evidence"]]
+    assert urls == ["https://official.example.test/blog/launch", "https://news.example.test/story-two"]
+
+
+# 2. request bodies are bounded while streaming, not by a header
+
+
+def test_chunked_json_body_over_the_limit_is_413(events_dir):
+    resp = _app(events_dir).post("/check", content=_chunks(20000),
+                                 headers={"content-type": "application/json"})
+    assert resp.status_code == 413 and resp.json()["error"]["code"] == "input_too_large"
+
+
+def test_chunked_multipart_body_over_the_limit_is_413(events_dir):
+    resp = _app(events_dir).post("/check", content=_chunks(1000 + 65536 + 10000),
+                                 headers={"content-type": "multipart/form-data; boundary=x"})
+    assert resp.status_code == 413 and resp.json()["error"]["code"] == "input_too_large"
+
+
+def test_deeply_nested_json_is_422_not_500(events_dir):
+    resp = _app(events_dir).post("/check", content=b"[" * 5000 + b"]" * 5000,
+                                 headers={"content-type": "application/json"})
+    assert resp.status_code == 422 and resp.json()["error"]["code"] == "invalid_input"
+
+
+# 3. unexpected errors are JSON with CORS headers; store and model failures are mapped
+
+
+def test_unexpected_error_is_a_json_500_the_browser_can_read(events_dir):
+    client, *_ = make_client(events_dir, error=RuntimeError("boom"))
+    resp = client.post("/check", json={"text": "anything factual"}, headers={"Origin": ORIGIN})
+    assert resp.status_code == 500 and resp.json()["error"]["code"] == "internal_error"
+    assert resp.headers["access-control-allow-origin"] == ORIGIN and "boom" not in resp.text
+
+
+def test_report_lookup_failure_is_503(events_dir):
+    resp = _app(events_dir, store=BrokenStore()).get("/check/" + "a" * 32)
+    assert resp.status_code == 503 and resp.json()["error"]["code"] == "store_unavailable"
+
+
+def test_gateway_maps_transport_errors_to_gemini_error():
+    class Boom:
+        class aio:
+            class models:
+                @staticmethod
+                async def generate_content(**kwargs):
+                    raise ConnectionError("network down")
+
+    gateway = GeminiGateway(project="p", region="r", model="m", client=Boom())
+    with pytest.raises(GeminiError):
+        asyncio.run(gateway.ground("a claim"))
+
+
+# 5. a deadline on the whole request and on each fetch
+
+
+def test_request_deadline_returns_504(events_dir):
+    client = _app(events_dir, gateway=SlowGateway(SCENARIOS["official_only_contradicts"]),
+                  check_request_timeout_s=0.05)
+    resp = client.post("/check", json={"text": "anything factual"})
+    assert resp.status_code == 504 and resp.json()["error"]["code"] == "timeout"
+
+
+def test_fetch_has_a_total_deadline():
+    async def slow(request):
+        await asyncio.sleep(5)
+        return httpx.Response(200, headers={"content-type": "text/plain"}, text="late")
+
+    fetcher = HttpFetcher(transport=httpx.MockTransport(slow), total_timeout=0.05,
+                          resolver=lambda host: ["93.184.216.34"])
+    with pytest.raises(FetchError):
+        asyncio.run(fetcher.fetch("https://news.example.test/a"))
+
+
+# 6. rate limiter: bounded memory, IPv6 /64 buckets, trusted proxy hops
+
+
+def test_rate_limiter_evicts_stale_clients_and_caps_memory():
+    now = [0.0]
+    limiter = RateLimiter(5, salt=b"s", clock=lambda: now[0], max_keys=3)
+    for client in ("a", "b", "c"):
+        assert limiter.check(client) is None
+    now[0] = 1.5
+    assert limiter.check("d") is not None  # full of active clients: refuse rather than grow
+    assert len(limiter._hits) == 3
+    now[0] = 62.0
+    assert limiter.check("d") is None and len(limiter._hits) <= 3
+
+
+def test_ipv6_clients_share_one_slash_64_bucket(events_dir):
+    client, *_ = make_client(events_dir, check_rate_limit_per_min=2)
+
+    def post(ip):
+        return client.post("/check", json={"text": "claim"}, headers={"X-Forwarded-For": ip}).status_code
+
+    assert post("2001:db8:0:1::1") == 200 and post("2001:db8:0:1::2") == 200
+    assert post("2001:db8:0:1:ffff::3") == 429
+    assert post("2001:db8:0:2::1") == 200
+
+
+def test_spoofed_forwarded_for_prefix_does_not_dodge_the_limit(events_dir):
+    client, *_ = make_client(events_dir, check_rate_limit_per_min=1)
+    first = client.post("/check", json={"text": "claim"}, headers={"X-Forwarded-For": "6.6.6.6, 198.51.100.1"})
+    second = client.post("/check", json={"text": "claim"}, headers={"X-Forwarded-For": "7.7.7.7, 198.51.100.1"})
+    assert (first.status_code, second.status_code) == (200, 429)
+
+
+def test_trusted_proxy_hops_pick_the_client_behind_a_load_balancer(events_dir):
+    client, *_ = make_client(events_dir, check_rate_limit_per_min=1, trusted_proxy_hops=2)
+
+    def post(chain):
+        return client.post("/check", json={"text": "claim"}, headers={"X-Forwarded-For": chain}).status_code
+
+    assert post("9.9.9.9, 1.1.1.1") == 200
+    assert post("9.9.9.9, 2.2.2.2") == 429
+    assert post("8.8.8.8, 1.1.1.1") == 200
+
+
+# 7. no compressed responses (decompression bombs)
+
+
+def test_fetcher_asks_for_identity_and_refuses_compressed_responses():
+    seen = []
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(200, headers={"content-type": "text/html", "content-encoding": "gzip"},
+                              content=b"not really gzip")
+
+    with pytest.raises(FetchError):
+        asyncio.run(_fetcher(handler, {"news.example.test": ["93.184.216.34"]})
+                    .fetch("https://news.example.test/a"))
+    assert seen[0].headers["accept-encoding"] == "identity"
+
+
+# 8. social blocklist cannot be dodged with host spelling
+
+
+@pytest.mark.parametrize("url", ["https://x.com./u", "https://a@b@x.com/", "https://user:pw@news.example.test/"])
+def test_fetcher_refuses_disguised_social_and_userinfo_urls(url):
+    fetcher = HttpFetcher(transport=httpx.MockTransport(lambda r: httpx.Response(200, text="x")),
+                          resolver=lambda host: ["93.184.216.34"])
+    with pytest.raises(FetchError):
+        asyncio.run(fetcher.fetch(url))
+
+
+@pytest.mark.parametrize("url", ["https://x.com./u", "https://a@b@x.com/", "https://user:pw@news.example.test/"])
+def test_service_refuses_disguised_social_and_userinfo_urls(events_dir, url):
+    client, gateway, fetcher, _ = make_client(events_dir)
+    resp = client.post("/check", json={"url": url})
+    assert resp.status_code == 422
+    assert fetcher.calls == [] and sum(gateway.calls.values()) == 0
+
+
+# extension: http is allowed for localhost only, and the permission pattern has no port
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_extension_address_helpers():
+    expected = ["https://check.example.test", "http://localhost:8081", "http://127.0.0.1:8081", "", "",
+                "http://localhost/*", "https://check.example.test/*"]
+    for name in ("background.js", "options.js"):
+        source = (EXTENSION / name).read_text()
+        helpers = "".join(re.search(rf"function {fn}\(.*?\n\}}\n", source, re.S).group(0)
+                          for fn in ("cleanBase", "originPattern"))
+        script = helpers + (
+            "console.log(JSON.stringify([cleanBase('https://check.example.test/'),"
+            "cleanBase('http://localhost:8081'), cleanBase('http://127.0.0.1:8081/'),"
+            "cleanBase('http://my-server.example'), cleanBase('ftp://x.test'),"
+            "originPattern('http://localhost:8081'), originPattern('https://check.example.test/api')]))"
+        )
+        out = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True).stdout
+        assert json.loads(out) == expected, name
