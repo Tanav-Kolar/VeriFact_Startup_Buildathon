@@ -28,6 +28,9 @@ MAX_INSTANCES="${MAX_INSTANCES:-2}"       # the rate limit and daily cap are per
 CORS_ORIGINS="${CORS_ORIGINS:-http://localhost:5173}"
 SA_NAME="verifact-check"
 SA="${SA_NAME}@${GCP_PROJECT}.iam.gserviceaccount.com"
+BUILD_SA_NAME="verifact-build"            # builds run as this account, not the default Compute account
+BUILD_SA="${BUILD_SA_NAME}@${GCP_PROJECT}.iam.gserviceaccount.com"
+SOURCE_BUCKET="${GCP_PROJECT}_cloudbuild"
 IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${REPO}/${SERVICE}:$(git rev-parse --short HEAD)"
 
 run() { echo "+ $*"; if [ "$APPLY" = 1 ]; then "$@"; fi; }
@@ -49,7 +52,23 @@ for role in roles/aiplatform.user roles/datastore.user roles/secretmanager.secre
     --role "$role" --condition=None --quiet
 done
 
+# A dedicated build account with only what a build needs: read the source archive (this bucket only),
+# write images (this repository only) and write logs. New projects no longer give the default Compute
+# account those rights, which is what made the first build fail with a 403.
+run_if_missing gcloud iam service-accounts create "$BUILD_SA_NAME" --project "$GCP_PROJECT" \
+  --display-name "VeriFact Check image builds"
+run_if_missing gcloud storage buckets create "gs://$SOURCE_BUCKET" --location "$GCP_REGION" \
+  --uniform-bucket-level-access --project "$GCP_PROJECT"
+run gcloud storage buckets add-iam-policy-binding "gs://$SOURCE_BUCKET" \
+  --member "serviceAccount:$BUILD_SA" --role roles/storage.objectViewer
+run gcloud artifacts repositories add-iam-policy-binding "$REPO" --location "$GCP_REGION" \
+  --project "$GCP_PROJECT" --member "serviceAccount:$BUILD_SA" --role roles/artifactregistry.writer
+run gcloud projects add-iam-policy-binding "$GCP_PROJECT" --member "serviceAccount:$BUILD_SA" \
+  --role roles/logging.logWriter --condition=None --quiet
+run sleep 20   # IAM changes take a moment to take effect
+
 run gcloud builds submit --config services/check/cloudbuild.yaml \
+  --service-account "projects/$GCP_PROJECT/serviceAccounts/$BUILD_SA" \
   --substitutions "_IMAGE=$IMAGE" --project "$GCP_PROJECT" .
 
 # "^@^" makes @ the separator, because CORS_ORIGINS contains commas.

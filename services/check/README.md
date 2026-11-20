@@ -125,6 +125,15 @@ the per-client rate limit and the daily call cap bound the cost). Set `CORS_ORIG
 web origin. The rate limit and daily cap are per instance, so the worst case is the cap times
 `MAX_INSTANCES`.
 
+Builds run as a dedicated `verifact-build` service account with only the rights a build needs (read
+the source archive, write to the repository, write logs), because new projects no longer give the
+default Compute account those rights.
+
+`GET /healthz` works locally and inside the container, but on a `*.run.app` URL Google's front end
+answers that path itself with an HTML 404. To test a deployed service use another path, for example
+send `{}` to `POST /check` and expect a `422`. If you run the script through a pipe, add
+`set -o pipefail`, or a failure will be hidden behind the last command's exit code.
+
 ## Run and test
 
 ```bash

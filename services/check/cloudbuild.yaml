@@ -3,3 +3,6 @@ steps:
   - name: gcr.io/cloud-builders/docker
     args: ["build", "-f", "services/check/Dockerfile", "-t", "${_IMAGE}", "."]
 images: ["${_IMAGE}"]
+# A build that runs as a custom service account must log to Cloud Logging only.
+options:
+  logging: CLOUD_LOGGING_ONLY
