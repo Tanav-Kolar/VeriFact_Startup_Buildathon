@@ -136,7 +136,25 @@ export function WorkspacePage() {
         setSignals(loadedSignals)
         setTrust(loadedTrust)
         if (isFirstLoad) {
-          setHour(resolveInitialPlayheadHour(searchParams.get('t'), loadedFrames))
+          const explicitT = searchParams.get('t')
+          const resolved = resolveInitialPlayheadHour(explicitT, loadedFrames)
+          if (!explicitT) {
+            const hasNodesAtResolved = loadedFrames.some(
+              (f) => f.hour <= resolved && f.nodes_added.length > 0
+            )
+            if (!hasNodesAtResolved) {
+              const latestWithNodes = loadedFrames.reduce<number | null>(
+                (acc, f) =>
+                  f.nodes_added.length > 0 && (acc === null || f.hour > acc) ? f.hour : acc,
+                null
+              )
+              setHour(latestWithNodes ?? resolved)
+            } else {
+              setHour(resolved)
+            }
+          } else {
+            setHour(resolved)
+          }
         }
       })
       .catch((err: unknown) => {
@@ -662,6 +680,10 @@ export function WorkspacePage() {
           focusedStorylineId={focusedStorylineId}
           selectedNodeId={selectedNodeId}
           onSelectNode={handleSelectNode}
+          onJumpToHour={(targetHour) => {
+            setIsPlaying(false)
+            setHour(targetHour)
+          }}
         />
 
         <Inspector

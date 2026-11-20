@@ -28,6 +28,7 @@ export interface NebulaGraphProps {
   focusedStorylineId: string | null
   selectedNodeId: string | null
   onSelectNode: (node: GraphNodeData | null) => void
+  onJumpToHour?: (hour: number) => void
 }
 
 interface PositionedNode {
@@ -116,11 +117,13 @@ export function NebulaGraph({
   currentHour,
   focusedStorylineId,
   selectedNodeId,
-  onSelectNode
+  onSelectNode,
+  onJumpToHour
 }: NebulaGraphProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const graphRef = useRef<Graph | null>(null)
   const sigmaRef = useRef<Sigma | null>(null)
+  const hadNodesRef = useRef(false)
 
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [hoveredNode, setHoveredNode] = useState<GraphNodeData | null>(null)
@@ -135,16 +138,26 @@ export function NebulaGraph({
     enabledPlatforms: []
   })
 
-  // Synchronize default platform filter list whenever event sources load
+  // Synchronize default platform filter list whenever event sources or frames load (include 'web' official snapshots)
+  const availablePlatforms = useMemo(() => {
+    const set = new Set<string>(enabledSources.map((s) => s.toLowerCase()))
+    for (const f of frames) {
+      for (const n of f.nodes_added) {
+        if (n.platform) set.add(n.platform.toLowerCase())
+      }
+    }
+    return Array.from(set)
+  }, [enabledSources, frames])
+
   useEffect(() => {
-    if (enabledSources.length > 0) {
+    if (availablePlatforms.length > 0) {
       setSettings((prev) =>
         prev.enabledPlatforms.length === 0
-          ? { ...prev, enabledPlatforms: enabledSources }
+          ? { ...prev, enabledPlatforms: availablePlatforms }
           : prev
       )
     }
-  }, [enabledSources])
+  }, [availablePlatforms])
 
   const storylineColourIndexMap = useMemo(() => {
     const map = new Map<string, number>()
@@ -497,6 +510,12 @@ export function NebulaGraph({
     }
 
     sigma.refresh()
+    if (visibleNodes.length > 0 && !hadNodesRef.current) {
+      hadNodesRef.current = true
+      sigma.getCamera().setState({ x: 0.5, y: 0.5, ratio: 1.05 })
+    } else if (visibleNodes.length === 0) {
+      hadNodesRef.current = false
+    }
     syncOverlay()
   }, [visibleNodes, visibleEdges, syncOverlay])
 
@@ -530,6 +549,18 @@ export function NebulaGraph({
       return { ...prev, enabledPlatforms: next }
     })
   }
+
+  const { firstDataHour, latestDataHour } = useMemo(() => {
+    let first: number | null = null
+    let latest: number | null = null
+    for (const f of frames) {
+      if (f.nodes_added.length > 0) {
+        if (first === null || f.hour < first) first = f.hour
+        if (latest === null || f.hour > latest) latest = f.hour
+      }
+    }
+    return { firstDataHour: first, latestDataHour: latest }
+  }, [frames])
 
   const isEmpty = visibleNodes.length === 0
 
@@ -710,8 +741,20 @@ export function NebulaGraph({
           <p className="vf-empty-subtitle">
             {frames.length === 0
               ? 'Waiting for replay frames or live items at this playhead.'
-              : `No items recorded up to ${formatHourOffset(currentHour)}.`}
+              : firstDataHour !== null && firstDataHour > currentHour
+                ? `No items recorded up to ${formatHourOffset(currentHour)}. First collected items appear at ${formatHourOffset(firstDataHour)}.`
+                : `No items recorded up to ${formatHourOffset(currentHour)}.`}
           </p>
+          {onJumpToHour && latestDataHour !== null && latestDataHour > currentHour ? (
+            <button
+              type="button"
+              className="vf-overlay-btn"
+              style={{ marginTop: '0.75rem', pointerEvents: 'auto' }}
+              onClick={() => onJumpToHour(latestDataHour)}
+            >
+              Jump to latest ({formatHourOffset(latestDataHour)})
+            </button>
+          ) : null}
         </div>
       ) : null}
 
