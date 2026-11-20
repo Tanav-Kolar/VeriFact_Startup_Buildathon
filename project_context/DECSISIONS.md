@@ -1,0 +1,5 @@
+- Lead demo = Narratives (live Token Factory graph). Check appears only as a panel on graph nodes. Radar and Trace are deferred.
+- Scope = the narrative-intelligence visualisation tool only. The browser extension, MCP server and bots are out of scope for now.
+- The engine is event-agnostic and config-driven. Sarvam Token Factory is the first configured case.
+- Stack = Cloud Scheduler + Cloud Run collectors -> Pub/Sub -> Cloud Run enrichment (Gemini) -> Spanner Graph + BigQuery -> Cloud Run API -> web graph front end.
+- Tool split = Claude project for specs, Antigravity for code, Claude Code for review.
