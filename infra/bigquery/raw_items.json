@@ -1,0 +1,64 @@
+{
+  "schema": {
+    "fields": [
+      {
+        "name": "event_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Event slug from the event config"
+      },
+      {
+        "name": "source",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Collector source: x, hn, youtube, gdelt, firecrawl, manual"
+      },
+      {
+        "name": "source_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Platform ID, or the URL hash for articles"
+      },
+      {
+        "name": "query_id",
+        "type": "STRING",
+        "mode": "NULLABLE",
+        "description": "Which configured query or fetch step produced it"
+      },
+      {
+        "name": "run_id",
+        "type": "STRING",
+        "mode": "NULLABLE",
+        "description": "Collector run that wrote it"
+      },
+      {
+        "name": "captured_by",
+        "type": "STRING",
+        "mode": "NULLABLE",
+        "description": "api (live collector) or backfill"
+      },
+      {
+        "name": "collected_at",
+        "type": "TIMESTAMP",
+        "mode": "REQUIRED",
+        "description": "UTC timestamp when the item was collected"
+      },
+      {
+        "name": "payload",
+        "type": "JSON",
+        "mode": "REQUIRED",
+        "description": "Response object exactly as received"
+      }
+    ]
+  },
+  "timePartitioning": {
+    "type": "DAY",
+    "field": "collected_at"
+  },
+  "clustering": {
+    "fields": [
+      "event_id",
+      "source"
+    ]
+  }
+}

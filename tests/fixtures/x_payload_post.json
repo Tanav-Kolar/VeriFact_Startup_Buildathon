@@ -1,0 +1,35 @@
+{
+  "synthetic": true,
+  "id": "1000000000000000001",
+  "text": "Announcing the new inference platform launch today.",
+  "author_id": "9000000001",
+  "created_at": "2026-11-16T13:37:16.000Z",
+  "lang": "en",
+  "conversation_id": "1000000000000000001",
+  "entities": {
+    "urls": [
+      {
+        "start": 20,
+        "end": 43,
+        "url": "https://t.co/example1",
+        "expanded_url": "https://example.org/blog/launch",
+        "display_url": "example.org/blog/launch"
+      },
+      {
+        "start": 44,
+        "end": 67,
+        "url": "https://t.co/example2",
+        "expanded_url": "https://docs.example.org/api",
+        "display_url": "docs.example.org/api"
+      }
+    ]
+  },
+  "public_metrics": {
+    "retweet_count": 12,
+    "reply_count": 5,
+    "like_count": 48,
+    "quote_count": 3,
+    "bookmark_count": 7,
+    "impression_count": 1250
+  }
+}

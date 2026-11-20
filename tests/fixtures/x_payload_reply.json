@@ -1,0 +1,23 @@
+{
+  "synthetic": true,
+  "id": "1000000000000000002",
+  "text": "How does pricing compare across regions?",
+  "author_id": "9000000002",
+  "created_at": "2026-11-16T15:07:16.000Z",
+  "lang": "en",
+  "conversation_id": "1000000000000000001",
+  "referenced_tweets": [
+    {
+      "type": "replied_to",
+      "id": "1000000000000000001"
+    }
+  ],
+  "public_metrics": {
+    "retweet_count": 1,
+    "reply_count": 2,
+    "like_count": 9,
+    "quote_count": 0,
+    "bookmark_count": 0,
+    "impression_count": 310
+  }
+}

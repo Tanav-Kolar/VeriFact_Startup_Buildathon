@@ -1,0 +1,172 @@
+event_id: sarvam-token-factory
+name: "Sarvam Token Factory launch"
+
+t0:
+  utc: "2026-11-16T13:37:16Z"
+  source_url: "https://x.com/SarvamAI/status/2122323115535720921"
+  note: "Decoded from the X post ID"
+
+window:
+  pre_hours: 72
+  post_hours: 240
+  live: true
+
+official:
+  accounts:
+    - "SarvamAI"
+  posts:
+    - "2122323115535720921"
+    - "2122323152172883984"
+  urls:
+    - "https://www.sarvam.ai/blogs/sarvam-token-factory"
+    - "https://docs.sarvam.ai/api/token-factory"
+  spokespeople:
+    - "Pratyush Kumar"
+    - "Vivek Raghavan"
+
+entities:
+  org:
+    Sarvam:
+      - "Sarvam AI"
+      - "@SarvamAI"
+  product:
+    "Token Factory":
+      - "Sarvam Token Factory"
+      - "Sarvam Inference"
+  related:
+    - "DeepSeek"
+    - "Kimi"
+    - "GLM"
+    - "Gemma"
+    - "IndiaAI Mission"
+    - "OpenRouter"
+    - "Together AI"
+    - "Fireworks"
+    - "DeepInfra"
+
+keywords:
+  core:
+    - "sarvam token factory"
+    - "\"token factory\" sarvam"
+  context:
+    - "inference"
+    - "deepseek"
+    - "chinese"
+    - "neocloud"
+    - "sovereign"
+    - "subsidy"
+    - "GPU"
+    - "hosting"
+  exclude: []
+
+languages:
+  - "en"
+  - "hi"
+
+sources:
+  x:
+    enabled: true
+    max_posts: 1500
+    thread_ids:
+      - "2122323115535720921"
+  reddit:
+    enabled: false
+    subreddits:
+      - "developersIndia"
+      - "india"
+      - "IndiaTech"
+      - "indianstartups"
+      - "LocalLLaMA"
+  hn:
+    enabled: true
+  youtube:
+    enabled: true
+    max_videos: 25
+  news:
+    enabled: true
+    gdelt: true
+    google_news_rss: true
+  manual:
+    enabled: false
+    platforms:
+      - "linkedin"
+
+turning_points:
+  detect_official_response: true
+  manual:
+    - id: response-1
+      label: "Sarvam: GPUs privately procured / financed"
+      at_utc: null
+      confirmed: false
+      form: null
+
+seed_storylines:
+  - id: official-performance-and-price-claims
+    name: "Official performance and price claims (self-reported)"
+    seeds: []
+  - id: mostly-serving-chinese-models
+    name: "\"Mostly serving Chinese models\" (six of eight launch models are Chinese)"
+    seeds: []
+  - id: hosting-business-not-frontier-lab
+    name: "\"A hosting business, not a frontier lab\" / \"just another neocloud\""
+    seeds: []
+  - id: subsidised-government-gpus
+    name: "Subsidised government GPUs"
+    seeds: []
+  - id: centralisation-of-gpu-access
+    name: "Centralisation of GPU access"
+    seeds: []
+  - id: market-logic-defences
+    name: "Market-logic defences"
+    seeds: []
+  - id: data-sovereignty-and-residency
+    name: "Data sovereignty and residency (positive)"
+    seeds: []
+  - id: comparisons-with-openrouter-together-fireworks-deepinfra
+    name: "Comparisons with OpenRouter, Together, Fireworks, DeepInfra"
+    seeds: []
+  - id: context-backlash-after-mod-hq-ids-deal
+    name: "Context: the backlash followed Sarvam's AI deal with the Ministry of Defence's HQ IDS"
+    seeds: []
+
+claims_to_check:
+  - id: sarvam-105b-price
+    text: "Sarvam 105B price: ₹10/₹25 vs ₹15/₹60 vs ₹14/₹55 (introductory) per million tokens"
+  - id: models-at-launch
+    text: "Models at launch: 8"
+  - id: six-chinese-models
+    text: "\"6 Chinese models\""
+  - id: gemma-4-31b-speed
+    text: "Gemma 4 31B: 5× faster first token, 1.6× output speed"
+  - id: deepseek-450b-tokens-per-day
+    text: "450B+ DeepSeek tokens/day"
+  - id: requests-not-forwarded-overseas
+    text: "Requests not forwarded overseas"
+  - id: subsidised-gpu-access-ended-mar-2026
+    text: "Subsidised GPU access ended Mar 2026"
+  - id: runs-on-privately-procured-financed-gpus
+    text: "Runs on privately procured / financed GPUs"
+
+conflicts_of_interest:
+  - person: "Hemant Mohapatra"
+    relationship: "partner at Lightspeed India, which invests in Sarvam (per MediaNama)."
+
+known_coverage:
+  - "Inc42"
+  - "Analytics Insight"
+  - "MarkTechPost"
+  - "Unite.AI"
+  - "MediaNama"
+  - "BusinessWorld"
+  - "Careerindia"
+  - "Newsbytes"
+  - "TechFlow"
+  - "marketcalls"
+  - "Hermes"
+  - "AlphaSignal"
+  - "The Hindu BusinessLine"
+  - "Bloomberg"
+  - "tilnote"
+
+privacy:
+  min_followers_to_name: null
