@@ -29,7 +29,11 @@ import type {
   TimingSignal,
   TrustResponse
 } from '../types/api'
-import { computeHourFromT0 } from '../utils/format'
+import {
+  computeHourFromT0,
+  resolveInitialPlayheadHour,
+  resolveTurningPointHour
+} from '../utils/format'
 
 const FRAME_PREFETCH_CHUNK = 12
 const STORYLINE_PREFETCH_AHEAD = 3
@@ -83,10 +87,9 @@ export function WorkspacePage() {
   const [isLive, setIsLive] = useState(false)
   const [loadError, setLoadError] = useState<string | null>(null)
 
-  const [hour, setHour] = useState<number>(() => {
-    const parsed = initialHourParam !== null ? Number(initialHourParam) : 0
-    return Number.isFinite(parsed) ? Math.trunc(parsed) : 0
-  })
+  const [hour, setHour] = useState<number>(() =>
+    resolveInitialPlayheadHour(initialHourParam, [])
+  )
   const [isPlaying, setIsPlaying] = useState(false)
 
   const [focusedStorylineId, setFocusedStorylineId] = useState<string | null>(initialStorylineParam)
@@ -108,6 +111,8 @@ export function WorkspacePage() {
     storylinesInFlightRef.current.clear()
     prefetchedFrameWindowsRef.current.clear()
     initialFramesLoadedRef.current = false
+    setIsPlaying(false)
+    setHour(resolveInitialPlayheadHour(searchParams.get('t'), []))
   }, [eventId])
 
   // Load base event metadata, frames, signals, and trust
@@ -124,11 +129,15 @@ export function WorkspacePage() {
     ])
       .then(([detail, loadedFrames, loadedSignals, loadedTrust]) => {
         if (!active) return
+        const isFirstLoad = !initialFramesLoadedRef.current
         initialFramesLoadedRef.current = true
         setEventDetail(detail)
         setFrames(loadedFrames)
         setSignals(loadedSignals)
         setTrust(loadedTrust)
+        if (isFirstLoad) {
+          setHour(resolveInitialPlayheadHour(searchParams.get('t'), loadedFrames))
+        }
       })
       .catch((err: unknown) => {
         if (!active) return
@@ -403,12 +412,30 @@ export function WorkspacePage() {
   const handleJumpToResponse = useCallback(() => {
     const firstTp = eventDetail?.turning_points?.[0]
     if (!firstTp) return
-    const tpHour = computeHourFromT0(eventDetail?.t0_utc, firstTp.at_utc)
+    let responseNodeHour: number | null = null
+    for (const frame of frames) {
+      const match = frame.nodes_added.find((n) => n.is_response)
+      if (match) {
+        responseNodeHour = match.hour
+        break
+      }
+    }
+    const tpHour = resolveTurningPointHour(eventDetail?.t0_utc, firstTp, responseNodeHour)
     if (tpHour !== null) {
       setIsPlaying(false)
       handleChangeHour(tpHour)
     }
-  }, [eventDetail, handleChangeHour])
+  }, [eventDetail, frames, handleChangeHour])
+
+  const handleTogglePlay = useCallback(() => {
+    if (!isPlaying && hour >= maxHour) {
+      const restartHour = minHour <= 0 && maxHour >= 0 ? 0 : minHour
+      handleChangeHour(restartHour)
+      setIsPlaying(true)
+      return
+    }
+    setIsPlaying((prev) => !prev)
+  }, [isPlaying, hour, minHour, maxHour, handleChangeHour])
 
   const handleJumpToNow = useCallback(() => {
     if (eventDetail?.now_hour === null || eventDetail?.now_hour === undefined) return
@@ -534,7 +561,16 @@ export function WorkspacePage() {
     setSelectedItem(null)
     setSelectedClaim(null)
     setInspectorError(null)
-  }, [])
+    setSearchParams(
+      (params) => {
+        if (!params.has('storyline')) return params
+        const updated = new URLSearchParams(params)
+        updated.delete('storyline')
+        return updated
+      },
+      { replace: true }
+    )
+  }, [setSearchParams])
 
   // Items matching the currently focused storyline up to playhead hour (P1.6 expandable count)
   const focusedStorylineItems = useMemo(() => {
@@ -561,7 +597,10 @@ export function WorkspacePage() {
       const target = event.target as HTMLElement | null
       if (
         target &&
-        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable)
       ) {
         if (target.getAttribute('type') !== 'range') return
       }
@@ -576,7 +615,7 @@ export function WorkspacePage() {
         handleChangeHour(hour + 1)
       } else if (event.key === ' ') {
         event.preventDefault()
-        setIsPlaying((prev) => !prev)
+        handleTogglePlay()
       } else if (event.key === 'r' || event.key === 'R') {
         event.preventDefault()
         handleJumpToResponse()
@@ -588,7 +627,7 @@ export function WorkspacePage() {
 
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [hour, handleChangeHour, handleJumpToResponse, handleClearAll])
+  }, [hour, handleChangeHour, handleTogglePlay, handleJumpToResponse, handleClearAll])
 
   return (
     <div className="vf-workspace-shell">
@@ -658,7 +697,7 @@ export function WorkspacePage() {
         nowHour={eventDetail?.now_hour ?? null}
         isPlaying={isPlaying}
         onChangeHour={handleChangeHour}
-        onTogglePlay={() => setIsPlaying((prev) => !prev)}
+        onTogglePlay={handleTogglePlay}
         onJumpToResponse={handleJumpToResponse}
         onJumpToNow={handleJumpToNow}
       />

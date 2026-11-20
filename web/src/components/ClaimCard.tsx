@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { ClaimCardData, ClaimEvidence } from '../types/api'
-import { formatPlatformLabel, formatUtcTimestamp } from '../utils/format'
+import { formatPlatformLabel, formatUtcTimestamp, sanitizeHttpUrl } from '../utils/format'
 import { getClaimStatusPresentation } from '../utils/palette'
 
 export interface ClaimCardProps {
@@ -11,16 +11,6 @@ export interface ClaimCardProps {
 }
 
 type StanceFilter = 'all' | 'supports' | 'contradicts' | 'neutral'
-
-function isSafeHttpUrl(rawUrl: string | null | undefined): rawUrl is string {
-  if (!rawUrl) return false
-  try {
-    const parsed = new URL(rawUrl)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
-  } catch {
-    return false
-  }
-}
 
 function formatSourceType(sourceType: string): string {
   return sourceType.replace(/_/g, ' ')
@@ -133,16 +123,19 @@ export function ClaimCard({ claim, showDeepLink = false, onSelectItem }: ClaimCa
                       Inspect item
                     </button>
                   ) : null}
-                  {isSafeHttpUrl(ev.url) ? (
-                    <a
-                      href={ev.url}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="vf-external-link"
-                    >
-                      Open source item ↗
-                    </a>
-                  ) : null}
+                  {(() => {
+                    const safeUrl = sanitizeHttpUrl(ev.url)
+                    return safeUrl ? (
+                      <a
+                        href={safeUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="vf-external-link"
+                      >
+                        Open source item ↗
+                      </a>
+                    ) : null
+                  })()}
                 </div>
               </div>
             ))

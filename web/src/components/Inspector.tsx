@@ -14,6 +14,7 @@ import {
   formatLagSeconds,
   formatPlatformLabel,
   formatUtcTimestamp,
+  sanitizeHttpUrl,
   truncateExcerpt
 } from '../utils/format'
 import { getStorylineColour } from '../utils/palette'
@@ -36,16 +37,6 @@ export interface InspectorProps {
 }
 
 type InspectorTab = 'detail' | 'signals'
-
-function isSafeHttpUrl(rawUrl: string | null | undefined): rawUrl is string {
-  if (!rawUrl) return false
-  try {
-    const parsed = new URL(rawUrl)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
-  } catch {
-    return false
-  }
-}
 
 function VolumeSparkline({
   volumeByHour,
@@ -328,16 +319,19 @@ export function Inspector({
                 </div>
               ) : null}
 
-              {isSafeHttpUrl(selectedItem.url) ? (
-                <a
-                  href={selectedItem.url}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="vf-external-link"
-                >
-                  Open source item ↗
-                </a>
-              ) : null}
+              {(() => {
+                const safeUrl = sanitizeHttpUrl(selectedItem.url)
+                return safeUrl ? (
+                  <a
+                    href={safeUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="vf-external-link"
+                  >
+                    Open source item ↗
+                  </a>
+                ) : null
+              })()}
 
               {selectedItem.claims.length > 0 ? (
                 <div className="vf-inspector-subblock">

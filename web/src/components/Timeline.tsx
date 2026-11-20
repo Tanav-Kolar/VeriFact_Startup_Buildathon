@@ -1,6 +1,6 @@
 import { useMemo, type MouseEvent } from 'react'
 import type { FrameData, StorylineRow, TurningPoint } from '../types/api'
-import { computeHourFromT0, formatHourOffset } from '../utils/format'
+import { formatHourOffset, resolveTurningPointHour } from '../utils/format'
 import { getStorylineColour } from '../utils/palette'
 
 export interface TimelineProps {
@@ -96,10 +96,20 @@ export function Timeline({
     onChangeHour(clickedHour)
   }
 
+  const responseNodeHour = useMemo(() => {
+    for (const frame of frames) {
+      for (const node of frame.nodes_added) {
+        if (node.is_response) return node.hour
+      }
+    }
+    return null
+  }, [frames])
+
   const primaryTurningPoint = turningPoints[0] ?? null
-  const turningPointHour = primaryTurningPoint
-    ? computeHourFromT0(t0Utc, primaryTurningPoint.at_utc)
-    : null
+  const turningPointHour = resolveTurningPointHour(t0Utc, primaryTurningPoint, responseNodeHour)
+  const isTurningPointUnconfirmed = Boolean(
+    primaryTurningPoint && (!primaryTurningPoint.confirmed || !primaryTurningPoint.at_utc)
+  )
 
   const playheadX = xForHour(currentHour)
 
@@ -117,12 +127,14 @@ export function Timeline({
           disabled={turningPointHour === null}
           title={
             primaryTurningPoint
-              ? `${primaryTurningPoint.label}${primaryTurningPoint.confirmed ? '' : ' (time unconfirmed)'}`
+              ? isTurningPointUnconfirmed
+                ? `${primaryTurningPoint.label} (time unconfirmed — jumps to ${formatHourOffset(turningPointHour ?? 24)} marker)`
+                : `${primaryTurningPoint.label} (${formatHourOffset(turningPointHour ?? 24)})`
               : 'No turning point configured'
           }
         >
           Jump to response
-          {primaryTurningPoint && !primaryTurningPoint.confirmed ? (
+          {isTurningPointUnconfirmed ? (
             <span className="vf-unconfirmed-tag">time unconfirmed</span>
           ) : null}
         </button>
@@ -207,10 +219,11 @@ export function Timeline({
 
           {/* Turning point markers (gold dashed, P7.6 time unconfirmed when confirmed=false) */}
           {turningPoints.map((tp) => {
-            const tpHour = computeHourFromT0(t0Utc, tp.at_utc)
+            const tpHour = resolveTurningPointHour(t0Utc, tp, responseNodeHour)
             if (tpHour === null) return null
             const tx = xForHour(tpHour)
-            const label = tp.confirmed ? tp.label : `${tp.label} · time unconfirmed`
+            const isConfirmed = tp.confirmed && Boolean(tp.at_utc)
+            const label = isConfirmed ? tp.label : `${tp.label} · time unconfirmed`
             return (
               <g key={tp.id}>
                 <line

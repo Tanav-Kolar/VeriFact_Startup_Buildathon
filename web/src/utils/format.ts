@@ -1,4 +1,5 @@
 const IST_OFFSET_MS = 330 * 60 * 1000
+export const DEFAULT_UNCONFIRMED_TURNING_POINT_HOUR = 24
 
 function pad2(value: number): string {
   return String(value).padStart(2, '0')
@@ -112,4 +113,69 @@ export function formatBriefPlaceholder(value: string | null | undefined): string
     return '[n]'
   }
   return value
+}
+
+/**
+ * Validates that a URL uses an explicit http: or https: scheme, rejecting
+ * javascript:, data:, vbscript:, and malformed URLs.
+ */
+export function isSafeHttpUrl(rawUrl: string | null | undefined): rawUrl is string {
+  if (!rawUrl) return false
+  const trimmed = rawUrl.trim()
+  if (trimmed.length === 0) return false
+  try {
+    const parsed = new URL(trimmed)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+export function sanitizeHttpUrl(rawUrl: string | null | undefined): string | null {
+  if (!isSafeHttpUrl(rawUrl)) return null
+  return rawUrl.trim()
+}
+
+/**
+ * Resolves a turning point's playhead hour relative to T0.
+ * When a configured turning point has at_utc = null (unconfirmed time),
+ * falls back to any detected response node hour or the T+24h marker.
+ */
+export function resolveTurningPointHour(
+  t0Utc: string | null | undefined,
+  turningPoint: { at_utc?: string | null } | null | undefined,
+  fallbackResponseHour?: number | null
+): number | null {
+  if (!turningPoint) return null
+  const computed = computeHourFromT0(t0Utc, turningPoint.at_utc)
+  if (computed !== null) return computed
+  if (typeof fallbackResponseHour === 'number' && Number.isFinite(fallbackResponseHour)) {
+    return Math.trunc(fallbackResponseHour)
+  }
+  return DEFAULT_UNCONFIRMED_TURNING_POINT_HOUR
+}
+
+/**
+ * Picks the initial playhead hour: honours an explicit ?t= query parameter,
+ * otherwise opens at T0 (hour 0) whenever frames are empty or cover T0.
+ */
+export function resolveInitialPlayheadHour(
+  initialHourParam: string | null | undefined,
+  frames: ReadonlyArray<{ hour: number }>
+): number {
+  if (initialHourParam !== null && initialHourParam !== undefined && initialHourParam.trim() !== '') {
+    const parsed = Number(initialHourParam)
+    if (Number.isFinite(parsed)) {
+      return Math.trunc(parsed)
+    }
+  }
+  if (frames.length === 0) return 0
+  let minHour = Infinity
+  let maxHour = -Infinity
+  for (const f of frames) {
+    if (f.hour < minHour) minHour = f.hour
+    if (f.hour > maxHour) maxHour = f.hour
+  }
+  if (minHour <= 0 && maxHour >= 0) return 0
+  return minHour
 }
