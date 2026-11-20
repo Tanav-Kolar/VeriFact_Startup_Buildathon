@@ -25,11 +25,25 @@ trap 'rm -rf "${TMP_DIR}"' EXIT
 
 # 1. Build & deploy frame-builder Cloud Run Job
 FB_IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO}/frame-builder:latest"
+FB_CLOUDBUILD="${TMP_DIR}/frame-builder-cloudbuild.yaml"
+cat > "${FB_CLOUDBUILD}" <<EOF
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - services/frame_builder/Dockerfile
+      - -t
+      - ${FB_IMAGE}
+      - .
+images:
+  - ${FB_IMAGE}
+EOF
+
 gcloud builds submit "${REPO_ROOT}" \
   --project="${GCP_PROJECT}" \
   --region="${GCP_REGION}" \
-  --tag="${FB_IMAGE}" \
-  --dockerfile="services/frame_builder/Dockerfile"
+  --config="${FB_CLOUDBUILD}"
 
 FB_ACTION="create"
 if gcloud run jobs describe "frame-builder" --project="${GCP_PROJECT}" --region="${GCP_REGION}" >/dev/null 2>&1; then
@@ -47,11 +61,25 @@ gcloud run jobs "${FB_ACTION}" "frame-builder" \
 
 # 2. Build & deploy read-only API Cloud Run Service
 API_IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO}/api:latest"
+API_CLOUDBUILD="${TMP_DIR}/api-cloudbuild.yaml"
+cat > "${API_CLOUDBUILD}" <<EOF
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - services/api/Dockerfile
+      - -t
+      - ${API_IMAGE}
+      - .
+images:
+  - ${API_IMAGE}
+EOF
+
 gcloud builds submit "${REPO_ROOT}" \
   --project="${GCP_PROJECT}" \
   --region="${GCP_REGION}" \
-  --tag="${API_IMAGE}" \
-  --dockerfile="services/api/Dockerfile"
+  --config="${API_CLOUDBUILD}"
 
 gcloud run deploy "api" \
   --project="${GCP_PROJECT}" \

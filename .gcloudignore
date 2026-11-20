@@ -1,0 +1,20 @@
+.git/
+.gitignore
+.env
+.env.*
+!.env.example
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+node_modules/
+web/node_modules/
+web/dist/
+_legacy/
+frames_cache/
+.playwright-mcp/
+Claude outputs/
+*.pem
+*-key.json
+.DS_Store
