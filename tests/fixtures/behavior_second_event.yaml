@@ -1,0 +1,118 @@
+# synthetic: true
+event_id: synthetic-cloud-outage
+name: "Synthetic Cloud Outage Incident"
+
+t0:
+  utc: "2026-11-18T10:00:00Z"
+  source_url: "https://status.synthetic-cloud.org/incidents/123"
+  note: "Synthetic incident start"
+
+window:
+  pre_hours: 12
+  post_hours: 48
+  live: false
+
+official:
+  accounts:
+    - "SyntheticCloudOps"
+  posts:
+    - "123"
+  urls:
+    - "https://status.synthetic-cloud.org"
+  spokespeople:
+    - "Alex Rivera"
+
+entities:
+  org:
+    SyntheticCloud:
+      - "Synthetic Cloud Inc"
+      - "@SyntheticCloudOps"
+  product:
+    GlobalDNS:
+      - "Anycast DNS"
+  related:
+    - "Cloudflare"
+    - "Fastly"
+
+keywords:
+  core:
+    - "synthetic cloud outage"
+    - "syntheticcloud down"
+  context:
+    - "dns"
+    - "bgp"
+    - "failover"
+    - "latency"
+  exclude:
+    - "weather cloud"
+    - "cloud computing stock"
+
+languages:
+  - "en"
+  - "es"
+
+sources:
+  x:
+    enabled: true
+    max_posts: 100
+    thread_ids:
+      - "123"
+  reddit:
+    enabled: false
+    subreddits: []
+  hn:
+    enabled: true
+  youtube:
+    enabled: false
+  news:
+    enabled: true
+    gdelt: true
+    google_news_rss: true
+  manual:
+    enabled: false
+    platforms: []
+
+turning_points:
+  detect_official_response: true
+  manual:
+    - id: dns-mitigation-deployed
+      label: "Root cause DNS mitigation deployed"
+      at_utc: "2026-11-18T14:30:00Z"
+      confirmed: true
+      form: "status_page"
+
+seed_storylines:
+  - id: dns-routing-failure
+    name: "BGP and DNS route poisoning suspicions"
+    seeds:
+      - "BGP routing leak affected Anycast DNS nodes"
+  - id: cyberattack-rumors
+    name: "Unsubstantiated cyberattack rumors"
+    seeds:
+      - "Rumors of state-sponsored DDoS on infrastructure"
+  - id: service-restoration
+    name: "Official mitigation and failover recovery"
+    seeds:
+      - "Route re-advertisement restored European nodes"
+
+claims_to_check:
+  - id: root-cause-bgp
+    text: "Outage traced to upstream BGP misconfiguration"
+  - id: customer-data-loss
+    text: "Customer storage data was lost during failover"
+
+conflicts_of_interest:
+  - person: "Morgan Lee"
+    relationship: "board advisor at competitor FastNet"
+
+known_coverage:
+  - "TechCrunch"
+  - "The Register"
+  - "Ars Technica"
+
+privacy:
+  min_followers_to_name: 5000
+
+enrichment:
+  assign_threshold: 0.65
+  offtopic_floor: 0.30
