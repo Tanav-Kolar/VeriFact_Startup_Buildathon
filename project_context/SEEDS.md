@@ -43,12 +43,12 @@ keywords:
 languages: [en, hi]                     # languages to expect; quality is lower outside English
 
 sources:                                # one block per source; turn off what you don't use
-  x:        {enabled: true,  max_posts: 3000, thread_ids: ["2122323115535720921"]}
-  reddit:   {enabled: true,  subreddits: [developersIndia, india, IndiaTech, indianstartups, LocalLLaMA]}
+  x:        {enabled: true,  max_posts: 1500, thread_ids: ["2122323115535720921"]}   # $10 hard limit set in the X developer console
+  reddit:   {enabled: false, subreddits: [developersIndia, india, IndiaTech, indianstartups, LocalLLaMA]}
   hn:       {enabled: true}
   youtube:  {enabled: true,  max_videos: 25}
   news:     {enabled: true,  gdelt: true, google_news_rss: true}
-  manual:   {enabled: true,  platforms: [linkedin]}     # no API, captured by hand into a CSV
+  manual:   {enabled: false, platforms: [linkedin]}     # no API, captured by hand into a CSV
 
 turning_points:                         # moments to mark on the timeline
   detect_official_response: true        # auto: an official account or spokesperson posts or is quoted

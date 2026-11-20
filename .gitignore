@@ -1,28 +1,24 @@
-# Virtual Environment
-.venv/
-venv/
-ENV/
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.pytest_cache/
-
-# Node
-node_modules/
-.agents/node_modules/
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# Environment & Secrets
+# Secrets
 .env
 .env.*
 !.env.example
+*.pem
+*-key.json
+service-account*.json
 
-# macOS
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Node
+node_modules/
+dist/
+
+# OS / editors
 .DS_Store
-.AppleDouble
-.LSOverride
+.idea/
+.vscode/

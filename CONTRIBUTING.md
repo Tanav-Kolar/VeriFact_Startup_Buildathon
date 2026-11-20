@@ -12,30 +12,9 @@ VeriFact is built by a two-person team working with AI coding agents. This page 
 ## Branches and commits
 - One branch per spec: `spec/NN-name`. One PR per spec, titled `spec NN: <goal>`.
 - `main` always opens on a working replay of the first event.
-- Commits follow [Conventional Commits](https://www.conventionalcommits.org/):
-
-```
-<type>(<scope>): <summary>
-
-<optional body: why, not what>
-
-Spec: NN
-```
-
-| Type | Use for |
-| --- | --- |
-| `feat` | New behaviour a user or another service can see |
-| `fix` | A bug fix |
-| `test` | Tests or fixtures only |
-| `docs` | READMEs, steering docs, comments |
-| `refactor` | Code change with no behaviour change |
-| `chore` | Dependencies, config, `.gitignore`, tooling |
-| `ci` / `build` | Deploy scripts, Dockerfiles, Cloud Build |
-
-- **Scope** is the service or area: `x-backfill`, `collect-hn`, `enrich`, `api`, `check`, `web`, `extension`, `core`, `infra`, `events`, `rules`.
-- **Summary**: imperative, lower case, no full stop, at most 72 characters. For example, `feat(enrich): store stance agreement across 3 prompts`.
-- **`Spec: NN`** trailer on every commit made for a spec. Omit it only for work outside a spec (for example `chore(rules): ...`).
-- Add a `BREAKING CHANGE:` footer when a table, field or endpoint name changes.
+- Commits and PRs follow the ECC pack's `.agents/rules/common-git-workflow.md`: `<type>: <description>`, types `feat, fix, refactor, docs, test, chore, perf, ci`.
+- Add `Spec: NN` as the last line of the body for every commit made for a spec, so `git log --grep "Spec: 02"` finds them.
+- Testing follows `.agents/rules/common-testing.md` (test-first, 80% coverage). Tests mock paid APIs; they never call the live X API.
 - Never put secrets, keys or user data in a commit message.
 
 ## Before you push

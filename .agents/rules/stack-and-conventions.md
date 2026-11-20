@@ -46,7 +46,7 @@ Services import shared code only from `verifact_core`. Never import from `_legac
 ## Data rules
 - All timestamps are UTC, ISO 8601 with `Z`. Store `created_at` (platform) and `collected_at` (ours). Replay uses `created_at`. `hours_from_t0` is computed from `t0.utc` in the config.
 - `raw_items` stores payloads unmodified. Never run UPDATE or DELETE on it. Dedupe in the `items` view.
-- Every job is idempotent: a re-run does not duplicate rows or re-bill API reads. Collectors keep a cursor per event, source and query.
+- Every job is idempotent: a re-run does not duplicate rows or re-bill API reads. Collectors keep a cursor per event, source and query in Firestore `collector_cursors`, using the helpers in `verifact_core/cursors.py`. X read counts live there too.
 - Every `enrichments` row stores `model_id` and `prompt_version`.
 - Collectors write to BigQuery directly, in batches. Pub/Sub is not used (DECISIONS 2026-11-20 late #10; this supersedes PRD IR-3 and IR-4).
 - Graph backend is chosen by env `GRAPH_BACKEND=spanner|frames`. The `frames` path (precomputed from BigQuery) must keep working, because it is the fallback.

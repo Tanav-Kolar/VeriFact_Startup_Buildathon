@@ -24,13 +24,15 @@ Cloud Scheduler → Cloud Run Jobs (collectors) → BigQuery `raw_items` (direct
 | `events/<event_id>.yaml` | One file per event |
 | `_legacy/` | Read-only snapshot of old code. Copy from it; never edit or import it |
 
+**ECC pack** (`common-*`, `python-*`, `typescript-*` rules and the ECC workflows in `.agents/`) governs how code is written: test-first development and coverage, commit and PR format, research before building, code review. Follow it. `principles.md` and `secrets-and-cost.md` still win on product behaviour, data, privacy, cost and secrets. Tests never call the live X API or other paid APIs.
+
 **When documents disagree:** newest entry in `DECISIONS.md` > the spec > other `steering_docs/` files > `PRD.md` > `_legacy/`. If the conflict affects what you build, stop and ask.
 
 ## How to treat a spec
 1. Build only what the spec says. Nothing from "Out of scope", no extra features, no refactors outside its files.
 2. Use the exact table, file, endpoint and field names it gives.
 3. If a step needs a decision the spec does not make, or it hits an item under "Open questions", stop and ask. Do not guess.
-4. Commit with Conventional Commits: `<type>(<scope>): <summary>` plus a `Spec: NN` trailer (types and scopes in `CONTRIBUTING.md`).
+4. Commit in the ECC format (`common-git-workflow.md`), with a `Spec: NN` line in the commit body.
 5. You are done when every numbered acceptance criterion is met and you have reported each one as met or not met, with the evidence (test, command output, file and line).
 
 ## Never

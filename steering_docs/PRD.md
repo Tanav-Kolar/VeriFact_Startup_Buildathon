@@ -8,13 +8,13 @@ The prototype shows what. Sections 1–8 follow the 2026 AI-era PRD template: wh
 
 ## 1. The Decision This Records
 
-We built two graph styles and three ingestion designs. We're shipping the WebGL point-cloud workspace, replayed from precomputed frames and fed by Pub/Sub into BigQuery, because it holds thousands of posts at 60 fps on stage and never depends on a live API call.
+We built two graph styles and three ingestion designs. We're shipping the WebGL point-cloud workspace, replayed from precomputed frames and fed by collectors writing directly to BigQuery, because it holds thousands of posts at 60 fps on stage and never depends on a live API call.
 
 | Area | Versions built | Shipping | Why |
 | --- | --- | --- | --- |
 | Graph view | The first mockup styling (still on the Before / after and Brief screens), then the nebula WebGL point cloud | WebGL point cloud (Sigma.js) | Holds the full corpus with glow; Cytoscape will not at 60 fps |
-| Ingestion | Full Pub/Sub (original stack); no Pub/Sub, enrichment polls BigQuery; Pub/Sub only between collectors and BigQuery | Pub/Sub into BigQuery, enrichment polls | Removes writer code, cheap, and has a 1-hour fallback to direct writes |
-| Graph store | Spanner Graph; Spanner optional with BigQuery frames; Spanner back in | Spanner Graph, BigQuery frames as fallback | Live graph and vector search in one store; about $3 per day through judging |
+| Ingestion | Full Pub/Sub (original stack); no Pub/Sub, enrichment polls BigQuery; Pub/Sub only between collectors and BigQuery | Direct batched writes to BigQuery, enrichment polls | One less service to set up and debug in a 20-hour build; Pub/Sub with a BigQuery subscription stays the scale-up path, same schema (DECISIONS 2026-11-20 late #10) |
+| Graph store | Spanner Graph; Spanner optional with BigQuery frames; Spanner back in | Spanner Graph, BigQuery frames as fallback | Live graph queries (GQL) on a schemaless node/edge design; about $3 per day through judging |
 
 ## 2. Opportunity Framing
 
@@ -89,7 +89,7 @@ Events go to a BigQuery `events` table (*proposed*), each with `event_id`, times
 | `check_submitted`, `check_result_shown` | input type, status, latency | Check use and speed |
 | `collector_run` | source, items, cost, errors | Ingestion health and spend |
 | `enrich_run` | items, lag, errors, tokens | Enrichment health and spend |
-| `dlq_message` | source, reason | Schema problems |
+| `bq_insert_error` | source, reason | Rows BigQuery rejected (schema problems) |
 
 ### Behavior contract
 
@@ -183,13 +183,13 @@ Numbers here are *proposed* until agreed.
     3. After the buildathon: a public demo link, replay only, unless we decide to keep live ingestion running.
 - **Ramp gates:**
     - Internal to judges: every release criterion in section 8 passes, and two full rehearsals of the 3-minute script run without a stall.
-    - Live ingestion on the judges' link: 24 hours of collectors with zero dead-letter messages and enrichment lag under 5 minutes.
+    - Live ingestion on the judges' link: 24 hours of collectors with zero rejected BigQuery inserts and enrichment lag under 5 minutes.
     - Spanner live graph instead of BigQuery frames: API p95 under 500 ms during rehearsal.
 - **Kill switch:** Percival owns the GCP project and the X developer console and can flip these. Rollback is a traffic switch to the last good Cloud Run revision.
 
 | Switch | Off means | Flip when |
 | --- | --- | --- |
-| `LIVE_INGESTION` | Replay only; collectors paused | Dead-letter queue above 50 messages, or enrichment lag above 15 minutes |
+| `LIVE_INGESTION` | Replay only; collectors paused | More than 50 rejected BigQuery inserts, or enrichment lag above 15 minutes |
 | `SPANNER_LIVE` | API serves BigQuery frames | API error rate above 5% for 5 minutes, or p95 above 2 s |
 | `CHECK_ENABLED` | Check page shows cached examples | Gemini spend above $2 in a day, or more than 200 Check requests in an hour |
 | X spend limit | X collector stops | $10 reached (set in the X developer console) |
@@ -220,6 +220,8 @@ Numbers here are *proposed* until agreed.
 
 | Version | Date | Change | Results link | What surprised us | Decision |
 | --- | --- | --- | --- | --- | --- |
+| v0.4 | 20 Nov 2026 | Spanner schemaless design, no vector search (storyline centres compared in memory); tables `storyline_centres`, `account_map`; platform `web` for official snapshots | — | — | — |
+| v0.3 | 20 Nov 2026 | Pub/Sub removed: collectors write directly to BigQuery (DECISIONS late #10); SEEDS.md aligned to X cap 1,500 and Reddit/LinkedIn off | — | — | — |
 | v0.2 | 20 Nov 2026 | PRD restructured to the 2026 AI-era template; behavior contract, evals, rollout added | — | — | — |
 | v0.1 | 20 Nov 2026 | First PRD from decisions, mockups and the ingestion design | — | — | — |
 | v1 | Submission date (to add) | First release to judges | Add after judging | Add after judging | Iterate, scale or retire |
@@ -362,9 +364,9 @@ Five public sources feed one append-only BigQuery record; X is the only paid sou
 
 - IR-1 Each collector is a Cloud Run Job triggered by Cloud Scheduler. It reads its queries and budget from the event config.
 - IR-2 Each collector keeps a cursor (last ID or timestamp per event, source and query), so a re-run fetches only new items.
-- IR-3 Collectors publish batched messages to Pub/Sub topic `raw-items`. A BigQuery subscription writes them to `raw_items`; a dead-letter topic `raw-items-dlq` keeps rejected messages.
-- IR-4 Pub/Sub setup is timeboxed to 1 hour. Fallback: collectors write directly to `raw_items` with the same schema.
-- IR-5 `x-backfill` writes straight to BigQuery and does not wait for Pub/Sub. It must finish before 2026-11-23 13:37 UTC.
+- IR-3 Collectors write batched rows directly to `raw_items` through one shared BigQuery writer in `verifact_core`. Rejected rows are logged as `bq_insert_error` with source and reason, never dropped silently.
+- IR-4 Pub/Sub is not used (DECISIONS 2026-11-20 late #10). It is the scale-up path after the buildathon and needs no schema change.
+- IR-5 `x-backfill` writes to `raw_items` the same way. It must finish before 2026-11-23 13:37 UTC.
 - IR-6 Raw payloads are stored unmodified and never updated (posts get deleted or edited).
 - IR-7 Every item has `created_at` (posted on the platform) and `collected_at` (fetched by us). Replay uses `created_at`.
 - IR-8 No scraping of social platforms. Firecrawl is used only for news article text and Sarvam's own pages.
@@ -379,13 +381,12 @@ BigQuery is the permanent record and the source of replay frames; Spanner Graph 
 
 | Store | Holds | Written by | Read by |
 | --- | --- | --- | --- |
-| BigQuery `raw_items` | Every response as received: `event_id`, `source`, `source_id`, `collected_at`, JSON `payload`. Append-only | Pub/Sub BigQuery subscription; `x-backfill` directly | `items` view |
+| BigQuery `raw_items` | Every response as received: `event_id`, `source`, `source_id`, `collected_at`, JSON `payload`. Append-only | Collectors and `x-backfill`, direct batched writes | `items` view |
 | BigQuery `items` (view) | One row per post, comment or article in a common shape, deduplicated on `source:source_id` | SQL view | Enrichment job, API |
 | BigQuery `enrichments` | Language, embedding, storyline and similarity, stance, claims, entities, neutral signals; model and prompt version on every row | Enrichment job | API, brief, trust strip |
-| Spanner Graph | Nodes and edges with `valid_from`; storyline centres for vector search | Enrichment job (upsert) | API (live graph, GQL) |
+| Spanner Graph | `GraphNode` and `GraphEdge` with `valid_from` (schemaless, see data-model.md) | Enrichment job (upsert) | API (live graph, GQL) |
 | Firestore `collector_cursors` (*proposed*) | Last ID or timestamp per event, source and query | Collectors | Collectors |
 | Firestore (Check reports) | Claim-card results from the Check page and extension | Check service | Check page, extension |
-| Pub/Sub `raw-items-dlq` | Messages the BigQuery subscription rejected | Pub/Sub | Debugging |
 
 **Common item shape (`items`):** `id, event_id, platform, kind, url, author_ref, author_followers, created_at (UTC), collected_at, text, lang, parent_id, quote_of, links[], engagement{likes, reposts, replies, views, score}, hours_from_t0, captured_by (api | backfill)`.
 
@@ -430,7 +431,7 @@ Six of the report's ten methods are fully on screen, three appear as one small e
 
 ## Architecture and stack
 
-Collectors publish to Pub/Sub, a BigQuery subscription stores every raw item, one enrichment job turns items into graph data, and a Cloud Run API serves replay frames and live updates.
+Collectors write every raw item straight to BigQuery, one enrichment job turns items into graph data, and a Cloud Run API serves replay frames and live updates.
 
 ```mermaid
 flowchart LR
@@ -444,7 +445,6 @@ flowchart LR
     FC["Firecrawl"]
   end
   COL["Collectors (Cloud Run Jobs)<br/>x-backfill (one-off), collect-x,<br/>collect-hn, collect-youtube,<br/>collect-gdelt, fetch-pages<br/>cursors per query"]
-  PS["Pub/Sub raw-items<br/>batched, dead-letter"]
   BQ["BigQuery<br/>raw_items (append-only)<br/>items view (deduped)<br/>enrichments"]
   AI["Vertex AI Gemini<br/>Flash-Lite, embeddings"]
   EN["enrich job<br/>every 1–2 min"]
@@ -460,9 +460,7 @@ flowchart LR
   YT --> COL
   GD --> COL
   FC --> COL
-  COL --> PS
-  COL -. "x-backfill direct write" .-> BQ
-  PS -- "BigQuery subscription" --> BQ
+  COL -- "batched writes" --> BQ
   BQ <--> EN
   AI <--> EN
   EN -- upserts --> SP
@@ -472,20 +470,20 @@ flowchart LR
   classDef note fill:#f1f3f4,stroke:#999;
 ```
 
-The dashed line is the one-off X backfill, which writes straight to BigQuery so it does not wait for Pub/Sub. The enrichment job polls BigQuery and writes its results back; there is no Pub/Sub between enrichment and Spanner.
+All collectors, including the one-off X backfill, write straight to BigQuery. The enrichment job polls BigQuery and writes its results back; no queue sits between any stages.
 
 | Layer | Choice | Why |
 | --- | --- | --- |
 | Scheduling and collection | Cloud Scheduler + Cloud Run Jobs | Polling every few minutes is enough at this volume |
-| Queue | Pub/Sub with a BigQuery subscription | Decouples collection from storage with no writer code; the scale-up path |
+| Queue | None: direct batched writes to BigQuery | Fewest moving parts for a 20-hour build; Pub/Sub with a BigQuery subscription is the scale-up path |
 | Record and analytics | BigQuery | Append-only raw record; replay frames come from here |
 | AI | Vertex AI Gemini Flash-Lite and embeddings | Cheapest models that do the job |
-| Live graph | Spanner Graph, Enterprise, 100 PU | Graph queries (GQL) and vector search in one store; fallback is BigQuery frames |
+| Live graph | Spanner Graph, Enterprise, 100 PU | Graph queries (GQL); storyline assignment is an in-memory comparison against about 10 centres, so no vector index; fallback is BigQuery frames |
 | API | Cloud Run service with server-sent events | One-way live updates to the browser |
 | Front end | Web app with Sigma.js (WebGL) | Cytoscape will not hold this density with glow at 60 fps |
 | Small state | Firestore | Collector cursors (*proposed*) and Check reports |
 
-Not used: Memorystore, Dataflow, push subscriptions to Cloud Run.
+Not used: Pub/Sub, Memorystore, Dataflow.
 
 ## Event config
 
@@ -502,7 +500,7 @@ A new event is one YAML file, `events/<event_id>.yaml`, with no code changes. Ev
 | `turning_points` (auto-detect, manual) | Timeline markers and the before / after split |
 | `seed_storylines`, `claims_to_check`, `conflicts_of_interest`, `known_coverage` | Optional hints: names, the claim card, disclosures, news backfill |
 
-**Sarvam config changes from the ingestion chat:** `reddit` and `manual` (LinkedIn) set to `enabled: false`; add `gdelt` and `firecrawl` blocks; X cap 1,500 posts with a $10 limit (SEEDS.md still says 3,000).
+**Sarvam config changes from the ingestion chat:** `reddit` and `manual` (LinkedIn) set to `enabled: false`; add `gdelt` and `firecrawl` blocks; X cap 1,500 posts with a $10 limit (now also in SEEDS.md).
 
 **Second event:** rehearse the end-to-end flow on at least two other events before showing one live to the jury.
 
@@ -545,7 +543,7 @@ These are non-negotiable and apply to every screen, the brief and every spec.
 | Spanner Graph | About $3 per day | Enterprise edition, 100 processing units, one regional instance through judging, deleted after |
 | X reads | About $7.50 for 1,500 posts, plus about $0.50 for named-account profiles | Paid from the user's own card; $10 hard limit |
 | Gemini enrichment | About $1–2 for about 10,000 items, plus about $1 for embeddings | Flash-Lite; figures from secondary price trackers, not confirmed on Google's page |
-| Pub/Sub, BigQuery, Cloud Run, Firestore | Near zero at this volume | Publish in batches (each request billed as at least 1 KB) |
+| BigQuery, Cloud Run, Firestore | Near zero at this volume | Write to BigQuery in batches |
 
 After midnight on 20 Nov, GCP costs go to the user's card.
 
@@ -560,8 +558,7 @@ The data that cannot be rebuilt (the T0 window on X and Sarvam's original respon
 | Response time and form unconfirmed | Before the before / after screen and brief are final | Find the primary text and time; keep "time unconfirmed" visible until then |
 | Posts and pages deleted or edited | Ongoing | Append-only raw storage; dated Firecrawl snapshots of Sarvam's pages |
 | Spanner setup runs long | More than about 2 hours | Serve replay from BigQuery frames, the existing fallback |
-| Pub/Sub setup runs long | More than 1 hour | Direct BigQuery writes, same schema |
-| BigQuery subscription rejects messages | On schema mismatch | Simple typed key columns plus JSON payload; dead-letter topic |
+| BigQuery rejects inserts | On schema mismatch | Simple typed key columns plus JSON payload; rejected rows logged with reason |
 | Graph stutters on stage | Demo day | Sigma.js WebGL; precomputed frames; rehearse on the judging laptop |
 | Weak stance or clustering on Hinglish | Gold-set results | Show the accuracy honestly in the trust strip; keep original text visible |
 | "X is where narratives start" assumed, not shown | Demo framing | Present it as a finding (first-seen on X in N of M storylines), not a premise |
@@ -574,8 +571,8 @@ Each row becomes one spec in the project format (goal, inputs and outputs, steps
 | # | Spec | Depends on | Covers |
 | --- | --- | --- | --- |
 | 1 | `raw_items` table, `items` view and the event config loader | — | IR-6, IR-7; data model |
-| 2 | `x-backfill` job (10-post billing test, then the four-step fetch order) | 1 | IR-5; X fields |
-| 3 | Pub/Sub topic, BigQuery subscription and dead-letter topic | 1 | IR-3, IR-4 |
+| 2 | `x-backfill` job (10-post billing test, then the four-step fetch order) | 1, 3 | IR-5; X fields |
+| 3 | Shared BigQuery writer and Firestore cursor store in `verifact_core` (batched inserts, rejected-row logging, X read count) | 1 | IR-2, IR-3, IR-4 |
 | 4 | Collectors: `collect-hn`, `collect-youtube`, `collect-gdelt`, with cursors | 1, 3 | IR-1, IR-2 |
 | 5 | `fetch-pages` with Firecrawl (articles and official snapshots) | 4 | IR-8 |
 | 6 | `enrich` job: language, embeddings, storyline assignment, claims, stance with agreement | 1 | Enrichment steps 1–5 |
