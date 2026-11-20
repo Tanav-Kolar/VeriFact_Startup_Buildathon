@@ -1,0 +1,145 @@
+{
+  "schema": {
+    "fields": [
+      {
+        "name": "item_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Canonical item identifier (<platform>:<source_id>)"
+      },
+      {
+        "name": "event_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Event slug from the event config"
+      },
+      {
+        "name": "enriched_at",
+        "type": "TIMESTAMP",
+        "mode": "REQUIRED",
+        "description": "UTC timestamp when the enrichment row was produced"
+      },
+      {
+        "name": "model_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "LLM model identifier used for stance labelling"
+      },
+      {
+        "name": "embedding_model_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Embedding model identifier used for text vectors"
+      },
+      {
+        "name": "prompt_version",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Prompt template version identifier"
+      },
+      {
+        "name": "lang",
+        "type": "STRING",
+        "mode": "NULLABLE",
+        "description": "BCP-47 language tag (hi-en for Hinglish, und for empty text)"
+      },
+      {
+        "name": "embedding",
+        "type": "FLOAT64",
+        "mode": "REPEATED",
+        "description": "Embedding vector for the item text"
+      },
+      {
+        "name": "storyline_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Nearest storyline centre above assign_threshold, else unassigned"
+      },
+      {
+        "name": "storyline_similarity",
+        "type": "FLOAT64",
+        "mode": "NULLABLE",
+        "description": "Cosine similarity to the best-matching storyline centre"
+      },
+      {
+        "name": "second_storyline_id",
+        "type": "STRING",
+        "mode": "NULLABLE",
+        "description": "Second-best storyline centre identifier"
+      },
+      {
+        "name": "second_similarity",
+        "type": "FLOAT64",
+        "mode": "NULLABLE",
+        "description": "Cosine similarity to the second-best storyline centre"
+      },
+      {
+        "name": "off_topic",
+        "type": "BOOL",
+        "mode": "REQUIRED",
+        "description": "True if matched keywords.exclude or below offtopic_floor"
+      },
+      {
+        "name": "claims",
+        "type": "RECORD",
+        "mode": "REPEATED",
+        "description": "Verified claim stances aggregated across prompt paraphrases",
+        "fields": [
+          {
+            "name": "claim_id",
+            "type": "STRING",
+            "mode": "REQUIRED"
+          },
+          {
+            "name": "stance",
+            "type": "STRING",
+            "mode": "REQUIRED"
+          },
+          {
+            "name": "evidence_span",
+            "type": "STRING",
+            "mode": "REQUIRED"
+          },
+          {
+            "name": "votes",
+            "type": "STRING",
+            "mode": "REPEATED"
+          },
+          {
+            "name": "agreement",
+            "type": "FLOAT64",
+            "mode": "REQUIRED"
+          }
+        ]
+      },
+      {
+        "name": "entities",
+        "type": "STRING",
+        "mode": "REPEATED",
+        "description": "Config entity keys matched in the item text"
+      },
+      {
+        "name": "is_official",
+        "type": "BOOL",
+        "mode": "REQUIRED",
+        "description": "True if author is an official account or text quotes a configured spokesperson"
+      },
+      {
+        "name": "conflict_person",
+        "type": "STRING",
+        "mode": "NULLABLE",
+        "description": "Configured conflicts_of_interest person named in text or matching author"
+      }
+    ]
+  },
+  "timePartitioning": {
+    "type": "DAY",
+    "field": "enriched_at"
+  },
+  "clustering": {
+    "fields": [
+      "event_id",
+      "storyline_id"
+    ]
+  }
+}

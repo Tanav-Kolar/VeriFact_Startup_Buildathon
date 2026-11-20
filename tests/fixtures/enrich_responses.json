@@ -1,0 +1,96 @@
+{
+  "synthetic": true,
+  "stance_valid_majority": {
+    "a": {
+      "lang": "en",
+      "claims": [
+        {
+          "claim_id": "private-clusters",
+          "stance": "supports",
+          "evidence_span": "privately funded clusters"
+        }
+      ]
+    },
+    "b": {
+      "lang": "en",
+      "claims": [
+        {
+          "claim_id": "private-clusters",
+          "stance": "supports",
+          "evidence_span": "privately funded clusters"
+        }
+      ]
+    },
+    "c": {
+      "lang": "en",
+      "claims": []
+    }
+  },
+  "stance_single_run_only": {
+    "a": {
+      "lang": "en",
+      "claims": [
+        {
+          "claim_id": "launch-price-10",
+          "stance": "supports",
+          "evidence_span": "10 credits per million tokens"
+        }
+      ]
+    },
+    "b": {
+      "lang": "en",
+      "claims": []
+    },
+    "c": {
+      "lang": "en",
+      "claims": []
+    }
+  },
+  "stance_bad_span_and_unknown_claim": {
+    "a": {
+      "lang": "en",
+      "claims": [
+        {
+          "claim_id": "private-clusters",
+          "stance": "supports",
+          "evidence_span": "fabricated quote not present in item"
+        },
+        {
+          "claim_id": "made-up-claim-id",
+          "stance": "contradicts",
+          "evidence_span": "privately funded clusters"
+        }
+      ]
+    },
+    "b": {
+      "lang": "en",
+      "claims": [
+        {
+          "claim_id": "private-clusters",
+          "stance": "supports",
+          "evidence_span": "another fabricated quote"
+        },
+        {
+          "claim_id": "made-up-claim-id",
+          "stance": "contradicts",
+          "evidence_span": "privately funded clusters"
+        }
+      ]
+    },
+    "c": {
+      "lang": "en",
+      "claims": [
+        {
+          "claim_id": "private-clusters",
+          "stance": "supports",
+          "evidence_span": "third fabricated quote"
+        },
+        {
+          "claim_id": "made-up-claim-id",
+          "stance": "contradicts",
+          "evidence_span": "privately funded clusters"
+        }
+      ]
+    }
+  }
+}

@@ -38,11 +38,15 @@ def _get_bq_client(client: Any | None, settings: BqSettings) -> Any:
     return bigquery.Client(project=project)
 
 
-def _resolve_table_ref(bq_client: Any, settings: BqSettings) -> str:
+def _resolve_table_ref(
+    bq_client: Any, settings: BqSettings, table: str = RAW_ITEMS_TABLE
+) -> str:
+    if "." in table:
+        return table
     project = settings.gcp_project or getattr(bq_client, "project", "") or ""
     if isinstance(project, str) and project.strip():
-        return f"{project.strip()}.{settings.bq_dataset}.{RAW_ITEMS_TABLE}"
-    return f"{settings.bq_dataset}.{RAW_ITEMS_TABLE}"
+        return f"{project.strip()}.{settings.bq_dataset}.{table}"
+    return f"{settings.bq_dataset}.{table}"
 
 
 def _row_to_bq_dict(item: RawItem, run_id: str) -> dict[str, Any]:
@@ -93,13 +97,32 @@ def _log_rejection(item: RawItem, reason: str, run_id: str) -> None:
     logger.error(json.dumps(payload), extra=payload)
 
 
-def _insert_single_batch(
+def _log_row_rejection(table: str, source_id: str, reason: str) -> None:
+    payload = {
+        "event": "bq_insert_error",
+        "table": table,
+        "source": table,
+        "source_id": source_id,
+        "reason": reason,
+    }
+    logger.error(json.dumps(payload), extra=payload)
+
+
+def _row_identifier(row: dict[str, Any], idx: int) -> str:
+    for key in ("item_id", "storyline_id", "source_id"):
+        val = row.get(key)
+        if val is not None and str(val).strip():
+            return str(val)
+    return f"row:{idx}"
+
+
+def _insert_json_batch(
     bq_client: Any,
     table_ref: str,
-    batch: list[RawItem],
-    run_id: str,
-) -> tuple[int, list[Rejection]]:
-    pending: list[RawItem] = list(batch)
+    batch_dicts: list[dict[str, Any]],
+) -> tuple[int, list[tuple[int, str]]]:
+    """Insert a batch of JSON dicts with retries; returns (written, [(orig_idx, reason), ...])."""
+    pending: list[tuple[int, dict[str, Any]]] = list(enumerate(batch_dicts))
     last_reasons: dict[int, str] = {}
     written = 0
 
@@ -107,12 +130,12 @@ def _insert_single_batch(
         if attempt > 1:
             time.sleep(BASE_BACKOFF_SECONDS * (2 ** (attempt - 2)))
 
-        row_dicts = [_row_to_bq_dict(item, run_id) for item in pending]
+        row_dicts = [row for _, row in pending]
         try:
             errors = bq_client.insert_rows_json(table_ref, row_dicts)
         except Exception as exc:  # noqa: BLE001
             reason_str = str(exc) or exc.__class__.__name__
-            last_reasons = {idx: reason_str for idx in range(len(pending))}
+            last_reasons = {pos: reason_str for pos in range(len(pending))}
             continue
 
         if not errors:
@@ -120,41 +143,87 @@ def _insert_single_batch(
             pending = []
             break
 
-        failed_by_index: dict[int, str] = {}
+        failed_by_pos: dict[int, str] = {}
         for err_entry in errors:
             raw_idx = err_entry.get("index", 0)
-            idx = int(raw_idx) if isinstance(raw_idx, int) else 0
-            if idx >= len(pending) and len(pending) == 1:
-                idx = 0
-            if 0 <= idx < len(pending):
-                failed_by_index[idx] = _extract_error_reason(err_entry)
+            pos = int(raw_idx) if isinstance(raw_idx, int) else 0
+            if pos >= len(pending) and len(pending) == 1:
+                pos = 0
+            if 0 <= pos < len(pending):
+                failed_by_pos[pos] = _extract_error_reason(err_entry)
 
-        if not failed_by_index:
+        if not failed_by_pos:
             reason_str = _extract_error_reason(errors[0]) if errors else "unknown_insert_error"
-            failed_by_index = {idx: reason_str for idx in range(len(pending))}
+            failed_by_pos = {pos: reason_str for pos in range(len(pending))}
 
-        succeeded_count = len(pending) - len(failed_by_index)
-        written += max(0, succeeded_count)
+        written += max(0, len(pending) - len(failed_by_pos))
 
-        next_pending: list[RawItem] = []
+        next_pending: list[tuple[int, dict[str, Any]]] = []
         next_reasons: dict[int, str] = {}
-        for old_idx in sorted(failed_by_index):
-            new_idx = len(next_pending)
-            next_pending.append(pending[old_idx])
-            next_reasons[new_idx] = failed_by_index[old_idx]
+        for old_pos in sorted(failed_by_pos):
+            new_pos = len(next_pending)
+            next_pending.append(pending[old_pos])
+            next_reasons[new_pos] = failed_by_pos[old_pos]
 
         pending = next_pending
         last_reasons = next_reasons
 
+    failed_out = [
+        (orig_idx, last_reasons.get(pos, "unknown_insert_error"))
+        for pos, (orig_idx, _) in enumerate(pending)
+    ]
+    return written, failed_out
+
+
+def _insert_single_batch(
+    bq_client: Any,
+    table_ref: str,
+    batch: list[RawItem],
+    run_id: str,
+) -> tuple[int, list[Rejection]]:
+    row_dicts = [_row_to_bq_dict(item, run_id) for item in batch]
+    written, failed = _insert_json_batch(bq_client, table_ref, row_dicts)
     rejected: list[Rejection] = []
-    for idx, item in enumerate(pending):
-        reason = last_reasons.get(idx, "unknown_insert_error")
+    for orig_idx, reason in failed:
+        item = batch[orig_idx]
         _log_rejection(item, reason, run_id)
         rejected.append(
             Rejection(source=item.source, source_id=item.source_id, reason=reason)
         )
-
     return written, rejected
+
+
+def write_rows(
+    table: str,
+    rows: list[dict[str, Any]],
+    *,
+    client: Any | None = None,
+) -> WriteResult:
+    """Append generic dict rows to a BigQuery table in batches of at most 500."""
+    if not isinstance(table, str) or not table.strip():
+        raise ValueError("table must be a non-empty string")
+    if not rows:
+        return WriteResult(written=0, rejected=[])
+
+    settings = BqSettings()
+    bq_client = _get_bq_client(client, settings)
+    table_ref = _resolve_table_ref(bq_client, settings, table.strip())
+
+    total_written = 0
+    all_rejected: list[Rejection] = []
+
+    for start in range(0, len(rows), BATCH_SIZE):
+        batch = rows[start : start + BATCH_SIZE]
+        batch_written, failed = _insert_json_batch(bq_client, table_ref, batch)
+        total_written += batch_written
+        for orig_idx, reason in failed:
+            row_id = _row_identifier(batch[orig_idx], start + orig_idx)
+            _log_row_rejection(table.strip(), row_id, reason)
+            all_rejected.append(
+                Rejection(source=table.strip(), source_id=row_id, reason=reason)
+            )
+
+    return WriteResult(written=total_written, rejected=all_rejected)
 
 
 def write_raw_items(
@@ -171,7 +240,7 @@ def write_raw_items(
 
     settings = BqSettings()
     bq_client = _get_bq_client(client, settings)
-    table_ref = _resolve_table_ref(bq_client, settings)
+    table_ref = _resolve_table_ref(bq_client, settings, RAW_ITEMS_TABLE)
 
     total_written = 0
     all_rejected: list[Rejection] = []

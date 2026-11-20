@@ -9,27 +9,58 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 EVENTS_DIR="${EVENTS_DIR:-${REPO_ROOT}/events}"
 
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "${TMP_DIR}"' EXIT
+
+create_table_from_schema() {
+  local table_name="$1"
+  local schema_json_path="$2"
+  shift 2
+  local extra_flags=("$@")
+
+  if ! bq --project_id="${GCP_PROJECT}" show "${GCP_PROJECT}:${BQ_DATASET}.${table_name}" >/dev/null 2>&1; then
+    local tmp_schema="${TMP_DIR}/${table_name}.schema.json"
+    python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))["schema"]["fields"]))' "${schema_json_path}" > "${tmp_schema}"
+    bq --project_id="${GCP_PROJECT}" --location="${GCP_REGION}" mk \
+      --table \
+      "${extra_flags[@]}" \
+      "${GCP_PROJECT}:${BQ_DATASET}.${table_name}" \
+      "${tmp_schema}"
+  fi
+}
+
 # 1. Create dataset if missing (idempotent)
 if ! bq --project_id="${GCP_PROJECT}" show --dataset "${GCP_PROJECT}:${BQ_DATASET}" >/dev/null 2>&1; then
   bq --project_id="${GCP_PROJECT}" --location="${GCP_REGION}" mk --dataset "${GCP_PROJECT}:${BQ_DATASET}"
 fi
 
 # 2. Create raw_items table if missing (idempotent, never drops or modifies raw_items)
-if ! bq --project_id="${GCP_PROJECT}" show "${GCP_PROJECT}:${BQ_DATASET}.raw_items" >/dev/null 2>&1; then
-  SCHEMA_FIELDS="$(python3 -c 'import json, sys; print(json.dumps(json.load(open(sys.argv[1]))["schema"]["fields"]))' "${SCRIPT_DIR}/raw_items.json")"
-  TMP_SCHEMA="$(mktemp)"
-  printf '%s\n' "${SCHEMA_FIELDS}" > "${TMP_SCHEMA}"
-  trap 'rm -f "${TMP_SCHEMA}"' EXIT
-  bq --project_id="${GCP_PROJECT}" --location="${GCP_REGION}" mk \
-    --table \
-    --time_partitioning_field=collected_at \
-    --time_partitioning_type=DAY \
-    --clustering_fields=event_id,source \
-    "${GCP_PROJECT}:${BQ_DATASET}.raw_items" \
-    "${TMP_SCHEMA}"
-fi
+create_table_from_schema \
+  "raw_items" \
+  "${SCRIPT_DIR}/raw_items.json" \
+  --time_partitioning_field=collected_at \
+  --time_partitioning_type=DAY \
+  --clustering_fields=event_id,source
 
-# 3. Create event_t0 table if missing and upsert configured events' T0 timestamps
+# 3. Create enrichment tables if missing (idempotent)
+create_table_from_schema \
+  "enrichments" \
+  "${SCRIPT_DIR}/enrichments.json" \
+  --time_partitioning_field=enriched_at \
+  --time_partitioning_type=DAY \
+  --clustering_fields=event_id,storyline_id
+
+create_table_from_schema \
+  "storyline_centres" \
+  "${SCRIPT_DIR}/storyline_centres.json" \
+  --clustering_fields=event_id
+
+create_table_from_schema \
+  "account_map" \
+  "${SCRIPT_DIR}/account_map.json" \
+  --clustering_fields=event_id,platform
+
+# 4. Create event_t0 table if missing and upsert configured events' T0 timestamps
 if ! bq --project_id="${GCP_PROJECT}" show "${GCP_PROJECT}:${BQ_DATASET}.event_t0" >/dev/null 2>&1; then
   bq --project_id="${GCP_PROJECT}" --location="${GCP_REGION}" mk \
     --table \
@@ -67,7 +98,7 @@ if [[ -n "${MERGE_SQL}" ]]; then
   bq --project_id="${GCP_PROJECT}" --location="${GCP_REGION}" query --use_legacy_sql=false "${MERGE_SQL}"
 fi
 
-# 4. Create or replace the items view
+# 5. Create or replace the items view
 RENDERED_VIEW_SQL="$(
   GCP_PROJECT="${GCP_PROJECT}" BQ_DATASET="${BQ_DATASET}" python3 - "${SCRIPT_DIR}/items_view.sql" <<'PY'
 import os

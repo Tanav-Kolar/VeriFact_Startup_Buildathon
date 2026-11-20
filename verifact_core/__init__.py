@@ -1,7 +1,8 @@
-from verifact_core.bq import write_raw_items
+from verifact_core.bq import write_raw_items, write_rows
 from verifact_core.config import (
     ClaimToCheck,
     ConflictOfInterest,
+    EnrichmentConfig,
     EntitiesConfig,
     EventConfig,
     KeywordsConfig,
@@ -17,29 +18,40 @@ from verifact_core.config import (
 )
 from verifact_core.cursors import add_reads, get_cursor, get_reads, set_cursor
 from verifact_core.models import Cursor, RawItem, Rejection, WriteResult
+from verifact_core.queries import Query, TimeBounds, build_queries, compute_time_bounds
+from verifact_core.url_safety import is_social_url, normalize_url, url_hash
 
 __all__ = [
     "ClaimToCheck",
     "ConflictOfInterest",
     "Cursor",
+    "EnrichmentConfig",
     "EntitiesConfig",
     "EventConfig",
     "KeywordsConfig",
     "ManualTurningPoint",
     "OfficialConfig",
     "PrivacyConfig",
+    "Query",
     "RawItem",
     "Rejection",
     "SeedStoryline",
     "SourcesConfig",
     "T0Config",
+    "TimeBounds",
     "TurningPointsConfig",
     "WindowConfig",
     "WriteResult",
     "add_reads",
+    "build_queries",
+    "compute_time_bounds",
     "get_cursor",
     "get_reads",
+    "is_social_url",
     "load_event",
+    "normalize_url",
     "set_cursor",
+    "url_hash",
     "write_raw_items",
+    "write_rows",
 ]

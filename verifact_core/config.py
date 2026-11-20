@@ -185,6 +185,11 @@ class PrivacyConfig(StrictFrozenModel):
     min_followers_to_name: int | None = None
 
 
+class EnrichmentConfig(StrictFrozenModel):
+    assign_threshold: float | None = None
+    offtopic_floor: float | None = None
+
+
 class EventConfig(StrictFrozenModel):
     event_id: str
     name: str
@@ -201,6 +206,7 @@ class EventConfig(StrictFrozenModel):
     conflicts_of_interest: list[ConflictOfInterest] = Field(default_factory=list)
     known_coverage: list[str] = Field(default_factory=list)
     privacy: PrivacyConfig = Field(default_factory=PrivacyConfig)
+    enrichment: EnrichmentConfig | None = None
 
     @field_validator("event_id")
     @classmethod

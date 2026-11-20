@@ -1,0 +1,42 @@
+{
+  "schema": {
+    "fields": [
+      {
+        "name": "event_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Event slug from the event config"
+      },
+      {
+        "name": "platform",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Item platform (x, hn, youtube, news, web, manual)"
+      },
+      {
+        "name": "author_ref",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Internal platform author identifier"
+      },
+      {
+        "name": "account_n",
+        "type": "INT64",
+        "mode": "REQUIRED",
+        "description": "Stable per-event sequential pseudonym number"
+      },
+      {
+        "name": "first_seen",
+        "type": "TIMESTAMP",
+        "mode": "REQUIRED",
+        "description": "UTC timestamp of first appearance"
+      }
+    ]
+  },
+  "clustering": {
+    "fields": [
+      "event_id",
+      "platform"
+    ]
+  }
+}

@@ -1,0 +1,47 @@
+{
+  "schema": {
+    "fields": [
+      {
+        "name": "event_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Event slug from the event config"
+      },
+      {
+        "name": "storyline_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Storyline slug from seed_storylines"
+      },
+      {
+        "name": "embedding",
+        "type": "FLOAT64",
+        "mode": "REPEATED",
+        "description": "L2-normalised mean embedding of seed sentences"
+      },
+      {
+        "name": "seed_hash",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "SHA-256 hash of seed sentences, embedding model, and dimension"
+      },
+      {
+        "name": "embedding_model_id",
+        "type": "STRING",
+        "mode": "REQUIRED",
+        "description": "Embedding model identifier"
+      },
+      {
+        "name": "computed_at",
+        "type": "TIMESTAMP",
+        "mode": "REQUIRED",
+        "description": "UTC timestamp when the centre was computed"
+      }
+    ]
+  },
+  "clustering": {
+    "fields": [
+      "event_id"
+    ]
+  }
+}
