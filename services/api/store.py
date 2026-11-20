@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import math
+import os
 from pathlib import Path
 import re
 from typing import Any, Callable, Protocol
@@ -673,7 +674,51 @@ def derive_before_after(
     }
 
 
-def derive_trust(dataset: EventDataset, event_config: dict[str, Any]) -> dict[str, Any]:
+def _load_latest_eval_gold(
+    event_id: str,
+    eval_results_dir: str | Path | None = None,
+) -> dict[str, Any] | None:
+    """Read the latest eval result JSON for event_id from EVAL_RESULTS_DIR, if present."""
+    if not event_id or not _SAFE_IDENT_RE.match(event_id):
+        return None
+    if eval_results_dir is not None:
+        results_dir = Path(eval_results_dir)
+    else:
+        env_dir = os.environ.get("EVAL_RESULTS_DIR", "").strip()
+        results_dir = Path(env_dir) if env_dir else Path("eval/results")
+    if not results_dir.is_dir():
+        return None
+
+    latest_key: tuple[str, str] | None = None
+    latest_gold: dict[str, Any] | None = None
+    for path in sorted(results_dir.glob(f"{event_id}_*.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(json.dumps({"event": "eval_result_read_error", "path": str(path), "error": str(exc)}))
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("run_date") is None and payload.get("assignment_accuracy") is None:
+            continue
+        key = (str(payload.get("run_date") or ""), path.name)
+        if latest_key is None or key > latest_key:
+            latest_key = key
+            latest_gold = {
+                "assignment_accuracy": payload.get("assignment_accuracy"),
+                "stance_macro_f1": payload.get("stance_macro_f1"),
+                "run_date": payload.get("run_date"),
+            }
+    return latest_gold
+
+
+def derive_trust(
+    dataset: EventDataset,
+    event_config: dict[str, Any],
+    *,
+    event_id: str | None = None,
+    eval_results_dir: str | Path | None = None,
+) -> dict[str, Any]:
     """Compute source coverage counts, unassigned_count, backfilled_share, and gold metrics."""
     coverage: dict[str, dict[str, Any]] = {}
     for src, conf in (event_config.get("sources") or {}).items():
@@ -702,6 +747,8 @@ def derive_trust(dataset: EventDataset, event_config: dict[str, Any]) -> dict[st
     pre_trust = dataset.precomputed_trust or {}
     backfilled_share = round(backfilled / cap_known, 4) if cap_known > 0 else pre_trust.get("backfilled_share")
     gold_val = dataset.gold if dataset.gold is not None else pre_trust.get("gold")
+    if gold_val is None and event_id:
+        gold_val = _load_latest_eval_gold(event_id, eval_results_dir=eval_results_dir)
     return {
         "coverage": coverage,
         "gold": gold_val,
@@ -1036,7 +1083,7 @@ class _BaseDerivedStore:
         return dict(self._brief_cache[key])
 
     def get_trust(self, event_id: str, event_config: dict[str, Any]) -> dict[str, Any]:
-        return derive_trust(self._load_dataset(event_id, event_config), event_config)
+        return derive_trust(self._load_dataset(event_id, event_config), event_config, event_id=event_id)
 
 
 class FramesStore(_BaseDerivedStore):
