@@ -19,6 +19,13 @@ from verifact_core.config import (
 from verifact_core.cursors import add_reads, get_cursor, get_reads, set_cursor
 from verifact_core.models import Cursor, RawItem, Rejection, WriteResult
 from verifact_core.queries import Query, TimeBounds, build_queries, compute_time_bounds
+from verifact_core.spanner_graph import (
+    GraphBatch,
+    UpsertResult,
+    build_graph_mutations,
+    query_graph_at_hour,
+    upsert_graph_batch,
+)
 from verifact_core.url_safety import is_social_url, normalize_url, url_hash
 
 __all__ = [
@@ -28,6 +35,7 @@ __all__ = [
     "EnrichmentConfig",
     "EntitiesConfig",
     "EventConfig",
+    "GraphBatch",
     "KeywordsConfig",
     "ManualTurningPoint",
     "OfficialConfig",
@@ -40,9 +48,11 @@ __all__ = [
     "T0Config",
     "TimeBounds",
     "TurningPointsConfig",
+    "UpsertResult",
     "WindowConfig",
     "WriteResult",
     "add_reads",
+    "build_graph_mutations",
     "build_queries",
     "compute_time_bounds",
     "get_cursor",
@@ -50,7 +60,9 @@ __all__ = [
     "is_social_url",
     "load_event",
     "normalize_url",
+    "query_graph_at_hour",
     "set_cursor",
+    "upsert_graph_batch",
     "url_hash",
     "write_raw_items",
     "write_rows",
