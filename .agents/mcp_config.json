@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "ecc-memory": {
+      "command": "node",
+      "args": [
+        "/Users/heathcliffe/VeriFact_Startup_Buildathon/.agents/scripts/memory-mcp.mjs"
+      ],
+      "env": {
+        "ECC_MEMORY_HARNESS": "antigravity"
+      }
+    }
+  }
+}
