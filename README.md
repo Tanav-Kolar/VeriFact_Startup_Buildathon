@@ -52,7 +52,43 @@ Cloud Scheduler → Cloud Run collectors → BigQuery (append-only raw record) �
 | `AGENTS.md`, `.agents/` | Instructions for the coding agents |
 
 ## Run locally
-`[Added as services land. Each service's README.md has its own setup.]`
+
+### 1. Python backend & shared package (`verifact_core/` + `services/`)
+Requires Python 3.12+.
+```bash
+cp .env.example .env
+pip install -e ".[dev]"
+```
+
+Run the read-only API server:
+```bash
+python3 -m uvicorn services.api.main:create_app --factory --host 127.0.0.1 --port 8000
+```
+
+Dry-run any collector against an event config (zero live API calls, zero writes):
+```bash
+python3 -m services.x_backfill.main --event events/sarvam-token-factory.yaml --dry-run
+python3 -m services.collect_hn.main --event events/sarvam-token-factory.yaml --dry-run
+python3 -m services.collect_youtube.main --event events/sarvam-token-factory.yaml --dry-run
+python3 -m services.collect_gdelt.main --event events/sarvam-token-factory.yaml --dry-run
+python3 -m services.fetch_pages.main --event events/sarvam-token-factory.yaml --dry-run
+```
+
+Run the full test suite and linter (no live APIs or GCP resources called):
+```bash
+pytest
+ruff check verifact_core services tests
+```
+
+### 2. Web frontend (`web/`)
+Requires Node.js 20+.
+```bash
+cd web
+cp .env.example .env
+npm install
+npm run dev
+```
+Open `http://127.0.0.1:5173/`. Each individual service under `services/` and `web/` also has its own `README.md` and `.env.example`.
 
 ## Add a new event
 Copy `events/sarvam-token-factory.yaml`, then set `event_id`, `t0`, the official accounts, entities, keywords and sources. The checklist is in [`project_context/SEEDS.md`](project_context/SEEDS.md) (Part 3).
