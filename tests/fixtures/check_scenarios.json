@@ -1,0 +1,118 @@
+{
+  "synthetic": true,
+  "note": "Synthetic model outputs and page texts for tests/test_check.py. No real posts, quotes, handles or URLs (example.test is reserved).",
+  "pages": {
+    "https://official.example.test/blog/launch": "Launch note. The Widget Factory hardware is privately funded by the company. More text follows.",
+    "https://news.example.test/story-one": "Pat Investor said the hardware purchase was financed with a government grant, according to the report.",
+    "https://news.example.test/story-two": "Reporters found that the hardware was bought with the company's own money and not from public funds."
+  },
+  "scenarios": {
+    "official_only_contradicts": {
+      "input_text": "The Widget Factory runs on subsidised hardware.",
+      "extraction": {
+        "about_person": false,
+        "claims": [{"text": "The Widget Factory runs on subsidised hardware", "matched_claim_id": "subsidised-hardware"}]
+      },
+      "grounded_uris": ["https://official.example.test/blog/launch"],
+      "stances": [
+        {"index": 0, "stance": "contradicts", "span": "The Widget Factory hardware is privately funded by the company"}
+      ],
+      "expect": {
+        "claim_id": "subsidised-hardware",
+        "status": "contradicted",
+        "counts": {"supporting": 0, "contradicting": 1, "neutral": 0},
+        "self_reported": true,
+        "evidence_urls": ["https://official.example.test/blog/launch"],
+        "source_types": ["company_statement"],
+        "conflict_persons": [null]
+      }
+    },
+    "mixed_with_conflict": {
+      "input_text": "The Widget Factory runs on subsidised hardware.",
+      "extraction": {
+        "about_person": false,
+        "claims": [{"text": "The Widget Factory runs on subsidised hardware", "matched_claim_id": "subsidised-hardware"}]
+      },
+      "grounded_uris": [
+        "https://official.example.test/blog/launch",
+        "https://news.example.test/story-one",
+        "https://news.example.test/story-two"
+      ],
+      "stances": [
+        {"index": 0, "stance": "contradicts", "span": "The Widget Factory hardware is privately funded by the company"},
+        {"index": 1, "stance": "supports", "span": "Pat Investor said the hardware purchase was financed with a government grant"},
+        {"index": 2, "stance": "contradicts", "span": "the hardware was bought with the company's own money"}
+      ],
+      "expect": {
+        "claim_id": "subsidised-hardware",
+        "status": "mixed",
+        "counts": {"supporting": 1, "contradicting": 2, "neutral": 0},
+        "self_reported": false,
+        "evidence_urls": [
+          "https://official.example.test/blog/launch",
+          "https://news.example.test/story-one",
+          "https://news.example.test/story-two"
+        ],
+        "source_types": ["company_statement", "investor_with_conflict", "press"],
+        "conflict_persons": [null, "Pat Investor", null]
+      }
+    },
+    "fabricated_span_dropped": {
+      "input_text": "The Widget Factory runs on subsidised hardware.",
+      "extraction": {
+        "about_person": false,
+        "claims": [{"text": "The Widget Factory runs on subsidised hardware", "matched_claim_id": "subsidised-hardware"}]
+      },
+      "grounded_uris": ["https://news.example.test/story-one"],
+      "stances": [
+        {"index": 0, "stance": "supports", "span": "this sentence does not appear on the page"}
+      ],
+      "expect": {
+        "claim_id": "subsidised-hardware",
+        "status": "unverified",
+        "counts": {"supporting": 0, "contradicting": 0, "neutral": 0},
+        "self_reported": false,
+        "evidence_urls": [],
+        "source_types": [],
+        "conflict_persons": []
+      }
+    },
+    "hallucinated_claim_id": {
+      "input_text": "Widgets are shipped on Tuesdays.",
+      "extraction": {
+        "about_person": false,
+        "claims": [{"text": "Widgets are shipped on Tuesdays", "matched_claim_id": "not-in-config"}]
+      },
+      "grounded_uris": [],
+      "stances": [],
+      "expect": {
+        "claim_id_prefix": "chk-",
+        "status": "unverified",
+        "counts": {"supporting": 0, "contradicting": 0, "neutral": 0},
+        "self_reported": false,
+        "evidence_urls": [],
+        "source_types": [],
+        "conflict_persons": [],
+        "matched_event_id": null,
+        "deep_link": null
+      }
+    },
+    "claim_text_not_in_input": {
+      "input_text": "Widgets are shipped on Tuesdays.",
+      "extraction": {
+        "about_person": false,
+        "claims": [{"text": "Widgets are shipped on Fridays", "matched_claim_id": null}]
+      },
+      "grounded_uris": [],
+      "stances": [],
+      "expect": {"claims": 0}
+    },
+    "model_flags_person": {
+      "input_text": "Tell me about the person who posted this.",
+      "extraction": {"about_person": true, "claims": []},
+      "grounded_uris": [],
+      "stances": [],
+      "expect": {"claims": 0}
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "VeriFact Check",
+  "version": "0.1.0",
+  "description": "Select text, right-click, and see the evidence around a claim, with sources and counts.",
+  "minimum_chrome_version": "110",
+  "permissions": ["contextMenus", "storage", "scripting", "activeTab"],
+  "optional_host_permissions": ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "action": {
+    "default_title": "VeriFact Check settings"
+  }
+}
