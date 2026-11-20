@@ -1,0 +1,145 @@
+{
+  "synthetic": true,
+  "search_response": {
+    "kind": "youtube#searchListResponse",
+    "items": [
+      {
+        "kind": "youtube#searchResult",
+        "id": {"kind": "youtube#video", "videoId": "synthVid001"},
+        "snippet": {
+          "publishedAt": "2026-11-16T16:00:00Z",
+          "channelId": "UC_synth_chan_1",
+          "title": "Synthetic Review Video 1"
+        }
+      },
+      {
+        "kind": "youtube#searchResult",
+        "id": {"kind": "youtube#video", "videoId": "synthVid002"},
+        "snippet": {
+          "publishedAt": "2026-11-16T17:00:00Z",
+          "channelId": "UC_synth_chan_2",
+          "title": "Synthetic Review Video 2"
+        }
+      },
+      {
+        "kind": "youtube#searchResult",
+        "id": {"kind": "youtube#video", "videoId": "synthVid003"},
+        "snippet": {
+          "publishedAt": "2026-11-16T18:00:00Z",
+          "channelId": "UC_synth_chan_3",
+          "title": "Synthetic Review Video 3"
+        }
+      }
+    ]
+  },
+  "videos_response": {
+    "kind": "youtube#videoListResponse",
+    "items": [
+      {
+        "kind": "youtube#video",
+        "id": "synthVid001",
+        "snippet": {
+          "publishedAt": "2026-11-16T16:00:00Z",
+          "channelId": "UC_synth_chan_1",
+          "title": "Synthetic Review Video 1",
+          "description": "Synthetic video description 1.",
+          "defaultAudioLanguage": "en"
+        },
+        "statistics": {
+          "viewCount": "12000",
+          "likeCount": "450",
+          "commentCount": "12"
+        }
+      },
+      {
+        "kind": "youtube#video",
+        "id": "synthVid002",
+        "snippet": {
+          "publishedAt": "2026-11-16T17:00:00Z",
+          "channelId": "UC_synth_chan_2",
+          "title": "Synthetic Review Video 2",
+          "description": "Synthetic video description 2.",
+          "defaultLanguage": "en"
+        },
+        "statistics": {
+          "viewCount": "3400",
+          "likeCount": "95",
+          "commentCount": "0"
+        }
+      }
+    ]
+  },
+  "channels_response": {
+    "kind": "youtube#channelListResponse",
+    "items": [
+      {
+        "kind": "youtube#channel",
+        "id": "UC_synth_chan_1",
+        "statistics": {
+          "subscriberCount": "250000"
+        }
+      },
+      {
+        "kind": "youtube#channel",
+        "id": "UC_synth_chan_2",
+        "statistics": {
+          "subscriberCount": "18000"
+        }
+      }
+    ]
+  },
+  "comment_threads_vid1": {
+    "kind": "youtube#commentThreadListResponse",
+    "items": [
+      {
+        "kind": "youtube#commentThread",
+        "id": "synthThread1",
+        "snippet": {
+          "videoId": "synthVid001",
+          "topLevelComment": {
+            "kind": "youtube#comment",
+            "id": "synthComment1",
+            "snippet": {
+              "videoId": "synthVid001",
+              "textOriginal": "Top level synthetic comment",
+              "textDisplay": "Top level synthetic comment",
+              "authorChannelId": {"value": "UC_synth_commenter_A"},
+              "likeCount": 7,
+              "publishedAt": "2026-11-16T16:30:00Z"
+            }
+          }
+        },
+        "replies": {
+          "comments": [
+            {
+              "kind": "youtube#comment",
+              "id": "synthReply1",
+              "snippet": {
+                "videoId": "synthVid001",
+                "parentId": "synthComment1",
+                "textOriginal": "Reply to synthetic comment",
+                "textDisplay": "Reply to synthetic comment",
+                "authorChannelId": {"value": "UC_synth_commenter_B"},
+                "likeCount": 2,
+                "publishedAt": "2026-11-16T16:45:00Z"
+              }
+            }
+          ]
+        }
+      }
+    ]
+  },
+  "comments_disabled_error": {
+    "error": {
+      "code": 403,
+      "message": "The video identified by the request has disabled comments.",
+      "errors": [
+        {
+          "message": "The video identified by the request has disabled comments.",
+          "domain": "youtube.commentThread",
+          "reason": "commentsDisabled"
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "synthetic": true,
+  "articles": [
+    {
+      "url": "https://Example.ORG/news/launch-story?utm_source=twitter&utm_medium=social&id=42#top",
+      "url_mobile": "",
+      "title": "Synthetic News Coverage of Launch",
+      "seendate": "20261116T150000Z",
+      "socialimage": "",
+      "domain": "example.org",
+      "language": "English",
+      "sourcecountry": "India"
+    },
+    {
+      "url": "https://example.org/news/launch-story?id=42&fbclid=abc123",
+      "url_mobile": "",
+      "title": "Synthetic News Coverage of Launch",
+      "seendate": "20261116T151000Z",
+      "socialimage": "",
+      "domain": "example.org",
+      "language": "English",
+      "sourcecountry": "India"
+    },
+    {
+      "url": "https://news.example.net/old-article",
+      "url_mobile": "",
+      "title": "Out of window synthetic article",
+      "seendate": "20261101T000000Z",
+      "socialimage": "",
+      "domain": "news.example.net",
+      "language": "English",
+      "sourcecountry": "India"
+    }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "synthetic": true,
+  "hits": [
+    {
+      "objectID": "90001001",
+      "title": "Synthetic Launch Announcement on HN",
+      "url": "https://example.org/launch-post",
+      "story_text": "<p>Synthetic story body with <b>markup</b>.</p>",
+      "author": "synth_hn_author_1",
+      "points": 142,
+      "num_comments": 3,
+      "created_at": "2026-11-16T15:00:00.000Z",
+      "created_at_i": 1794841200,
+      "_tags": ["story", "author_synth_hn_author_1", "story_90001001"]
+    },
+    {
+      "objectID": "90001099",
+      "title": "Out of window old story",
+      "url": "https://example.org/old-post",
+      "author": "synth_hn_old",
+      "points": 5,
+      "num_comments": 0,
+      "created_at": "2026-11-01T00:00:00.000Z",
+      "created_at_i": 1793491200,
+      "_tags": ["story", "story_90001099"]
+    }
+  ],
+  "nbHits": 2,
+  "page": 0,
+  "nbPages": 1,
+  "hitsPerPage": 100
+}
