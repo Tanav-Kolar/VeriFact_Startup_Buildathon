@@ -1,0 +1,15 @@
+{
+  "synthetic": true,
+  "success": true,
+  "data": {
+    "markdown": "# Synthetic Launch Story\n\nThis is synthetic markdown body text of the news article scraped by Firecrawl.\n\nKey statements from the launch were confirmed by independent sources.",
+    "metadata": {
+      "title": "Synthetic Launch Story",
+      "description": "Synthetic news coverage description",
+      "language": "en",
+      "sourceURL": "https://example.org/news/launch-story",
+      "statusCode": 200,
+      "article:published_time": "2026-11-16T15:30:00Z"
+    }
+  }
+}

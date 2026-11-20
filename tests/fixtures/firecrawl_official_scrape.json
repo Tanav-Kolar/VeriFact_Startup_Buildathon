@@ -1,0 +1,14 @@
+{
+  "synthetic": true,
+  "success": true,
+  "data": {
+    "markdown": "# Official Documentation\n\nThis is synthetic documentation of the official announcement page.\n\nAll details regarding pricing and service specifications are provided here.",
+    "metadata": {
+      "title": "Official Documentation",
+      "description": "Official documentation page",
+      "language": "en",
+      "sourceURL": "https://example.org/official/page",
+      "statusCode": 200
+    }
+  }
+}
