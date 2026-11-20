@@ -3,6 +3,7 @@ import { formatCount, formatPercent, formatPlatformLabel } from '../utils/format
 
 export interface TrustStripProps {
   trust: TrustResponse | null
+  onFocusUnassigned?: () => void
 }
 
 function renderCoverageItem(source: string, entry: TrustCoverageEntry | number | null | undefined): string {
@@ -20,11 +21,13 @@ function renderCoverageItem(source: string, entry: TrustCoverageEntry | number |
   return `${label}: ${countStr}`
 }
 
-export function TrustStrip({ trust }: TrustStripProps) {
+export function TrustStrip({ trust, onFocusUnassigned }: TrustStripProps) {
   const coverageEntries = trust ? Object.entries(trust.coverage ?? {}) : []
   const goldAccuracy = trust?.gold?.assignment_accuracy
   const goldF1 = trust?.gold?.stance_macro_f1
   const goldDate = trust?.gold?.run_date
+  const belowThreshold =
+    typeof goldAccuracy === 'number' && !Number.isNaN(goldAccuracy) && goldAccuracy < 0.7
 
   return (
     <footer className="vf-trust-strip" aria-label="Coverage and evaluation trust strip">
@@ -46,12 +49,24 @@ export function TrustStrip({ trust }: TrustStripProps) {
         <span className="vf-trust-value">
           Assignment {formatPercent(goldAccuracy)} · Macro-F1 {formatPercent(goldF1)}
           {goldDate ? ` (${goldDate})` : ''}
+          {belowThreshold ? ' · below 70% target' : ''}
         </span>
       </div>
 
       <div className="vf-trust-group">
         <span className="vf-trust-label">Unassigned</span>
-        <span className="vf-trust-value">{formatCount(trust?.unassigned_count)}</span>
+        {onFocusUnassigned ? (
+          <button
+            type="button"
+            className="vf-trust-pill vf-trust-action"
+            onClick={onFocusUnassigned}
+            title="Focus Unassigned items in graph"
+          >
+            {formatCount(trust?.unassigned_count)}
+          </button>
+        ) : (
+          <span className="vf-trust-value">{formatCount(trust?.unassigned_count)}</span>
+        )}
       </div>
 
       <div className="vf-trust-group">

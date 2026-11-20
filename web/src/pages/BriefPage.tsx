@@ -1,20 +1,51 @@
 import { useEffect, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { fetchBrief, fetchEventDetail } from '../api/client'
 import { ClaimCard } from '../components/ClaimCard'
 import { Header } from '../components/Header'
 import type { BriefResponse, EventDetail } from '../types/api'
-import { formatCount, formatUtcTimestamp } from '../utils/format'
+import {
+  formatBriefPlaceholder,
+  formatCount,
+  formatPlatformLabel,
+  formatUtcTimestamp
+} from '../utils/format'
+
+function renderCoverageSummary(coverage: Record<string, unknown> | undefined): string {
+  if (!coverage) return '[n]'
+  const entries = Object.entries(coverage)
+  if (entries.length === 0) return '[n]'
+  return entries
+    .map(([source, raw]) => {
+      const label = formatPlatformLabel(source)
+      if (typeof raw === 'number') {
+        return `${label}: ${formatCount(raw)}`
+      }
+      if (raw && typeof raw === 'object') {
+        const obj = raw as { count?: number | null; cap?: number | null }
+        const countStr = formatCount(obj.count)
+        if (typeof obj.cap === 'number') {
+          return `${label}: ${countStr}/${obj.cap}`
+        }
+        return `${label}: ${countStr}`
+      }
+      return `${label}: [n]`
+    })
+    .join(' · ')
+}
 
 export function BriefPage() {
   const { eventId = '' } = useParams<{ eventId: string }>()
+  const navigate = useNavigate()
   const [eventDetail, setEventDetail] = useState<EventDetail | null>(null)
   const [brief, setBrief] = useState<BriefResponse | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!eventId) return
     let active = true
+    setLoading(true)
     Promise.all([fetchEventDetail(eventId), fetchBrief(eventId).catch(() => null)])
       .then(([detail, briefData]) => {
         if (!active) return
@@ -24,11 +55,26 @@ export function BriefPage() {
       .catch((err: unknown) => {
         if (active) setError(err instanceof Error ? err.message : 'Unable to load brief')
       })
+      .finally(() => {
+        if (active) setLoading(false)
+      })
 
     return () => {
       active = false
     }
   }, [eventId])
+
+  const handleInspectItem = (itemId: string) => {
+    navigate(`/e/${encodeURIComponent(eventId)}?item=${encodeURIComponent(itemId)}`)
+  }
+
+  const generatedLabel =
+    brief?.generated_at && brief.generated_at.trim().length > 0
+      ? formatUtcTimestamp(brief.generated_at)
+      : '[n]'
+  const modelLabel = formatBriefPlaceholder(brief?.model_id)
+  const promptLabel = formatBriefPlaceholder(brief?.prompt_version)
+  const coverageLabel = renderCoverageSummary(brief?.coverage)
 
   return (
     <div className="vf-page-shell">
@@ -53,7 +99,7 @@ export function BriefPage() {
         </div>
 
         {error ? (
-          <div className="vf-error-banner" role="alert">
+          <div className="vf-error-banner vf-no-print" role="alert">
             {error}
           </div>
         ) : null}
@@ -63,14 +109,22 @@ export function BriefPage() {
             <h1>{eventDetail?.name ?? eventId} — Narrative Brief</h1>
             <p className="vf-brief-sub">
               T0: {formatUtcTimestamp(eventDetail?.t0_utc)} · Config:{' '}
-              {eventDetail?.config_file ?? '—'}
+              {eventDetail?.config_file ?? '[n]'}
             </p>
           </header>
 
-          {!brief ? (
-            <p className="vf-muted-empty">
-              Brief has not been generated for this event yet.
-            </p>
+          {loading ? (
+            <p className="vf-muted-empty">Loading brief…</p>
+          ) : !brief ? (
+            <div className="vf-brief-empty-body">
+              <p className="vf-muted-empty">
+                Brief has not been generated for this event yet.
+              </p>
+              <section className="vf-brief-section">
+                <h2>Method and limits</h2>
+                <p>Descriptive graph summary; not a causal estimate.</p>
+              </section>
+            </div>
           ) : (
             <>
               <section className="vf-brief-section">
@@ -83,7 +137,23 @@ export function BriefPage() {
                       <li key={idx}>
                         <span>{item.text}</span>{' '}
                         <span className="vf-item-refs">
-                          [{item.item_ids.length > 0 ? item.item_ids.join(', ') : 'no linked items'}]
+                          [
+                          {item.item_ids.length > 0 ? (
+                            item.item_ids.map((id, idIdx) => (
+                              <span key={id}>
+                                {idIdx > 0 ? ', ' : ''}
+                                <Link
+                                  to={`/e/${encodeURIComponent(eventId)}?item=${encodeURIComponent(id)}`}
+                                  className="vf-item-ref-link"
+                                >
+                                  {id}
+                                </Link>
+                              </span>
+                            ))
+                          ) : (
+                            'no linked items'
+                          )}
+                          ]
                         </span>
                       </li>
                     ))}
@@ -109,7 +179,14 @@ export function BriefPage() {
                     <tbody>
                       {brief.storylines.map((row) => (
                         <tr key={row.id}>
-                          <td>{row.name}</td>
+                          <td>
+                            <Link
+                              to={`/e/${encodeURIComponent(eventId)}?storyline=${encodeURIComponent(row.id)}`}
+                              className="vf-item-ref-link"
+                            >
+                              {row.name}
+                            </Link>
+                          </td>
                           <td>{formatCount(row.volume)}</td>
                           <td>{row.origin_and_spread || '—'}</td>
                           <td>{row.after_response || '—'}</td>
@@ -128,7 +205,11 @@ export function BriefPage() {
                 ) : (
                   <div className="vf-brief-claims">
                     {brief.claims.map((claim) => (
-                      <ClaimCard key={claim.claim_id} claim={claim} />
+                      <ClaimCard
+                        key={claim.claim_id}
+                        claim={claim}
+                        onSelectItem={handleInspectItem}
+                      />
                     ))}
                   </div>
                 )}
@@ -156,7 +237,25 @@ export function BriefPage() {
                     {brief.evidence_to_cite.map((ev, idx) => (
                       <li key={idx}>
                         <span>{ev.text}</span>{' '}
-                        <span className="vf-item-refs">[{ev.item_ids.join(', ')}]</span>
+                        <span className="vf-item-refs">
+                          [
+                          {ev.item_ids.length > 0 ? (
+                            ev.item_ids.map((id, idIdx) => (
+                              <span key={id}>
+                                {idIdx > 0 ? ', ' : ''}
+                                <Link
+                                  to={`/e/${encodeURIComponent(eventId)}?item=${encodeURIComponent(id)}`}
+                                  className="vf-item-ref-link"
+                                >
+                                  {id}
+                                </Link>
+                              </span>
+                            ))
+                          ) : (
+                            'no linked items'
+                          )}
+                          ]
+                        </span>
                       </li>
                     ))}
                   </ul>
@@ -167,14 +266,15 @@ export function BriefPage() {
                 <h2>6. Method and limits</h2>
                 <p>{brief.method_and_limits || 'Descriptive graph summary; not a causal estimate.'}</p>
               </section>
-
-              <footer className="vf-brief-footer">
-                <span>Generated: {formatUtcTimestamp(brief.generated_at)}</span>
-                <span>Model: {brief.model_id ?? '[model]'}</span>
-                <span>Prompt: {brief.prompt_version ?? '[prompt]'}</span>
-              </footer>
             </>
           )}
+
+          <footer className="vf-brief-footer">
+            <span>Coverage: {coverageLabel}</span>
+            <span>Generated: {generatedLabel}</span>
+            <span>Model: {modelLabel}</span>
+            <span>Prompt: {promptLabel}</span>
+          </footer>
         </article>
       </main>
     </div>

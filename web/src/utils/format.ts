@@ -90,3 +90,26 @@ export function formatPlatformLabel(platform: string): string {
       return platform.toUpperCase()
   }
 }
+
+export function truncateExcerpt(text: string | null | undefined, maxChars = 300): string {
+  if (!text) return ''
+  if (text.length <= maxChars) return text
+  return `${text.slice(0, Math.max(0, maxChars - 1))}…`
+}
+
+export function formatLagSeconds(lagSeconds: number | null | undefined): string {
+  if (lagSeconds === null || lagSeconds === undefined || Number.isNaN(lagSeconds)) {
+    return '[n]s'
+  }
+  if (lagSeconds < 60) return `${Math.round(lagSeconds)}s`
+  const mins = Math.floor(lagSeconds / 60)
+  const rem = Math.round(lagSeconds % 60)
+  return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`
+}
+
+export function formatBriefPlaceholder(value: string | null | undefined): string {
+  if (!value || value.trim().length === 0) {
+    return '[n]'
+  }
+  return value
+}

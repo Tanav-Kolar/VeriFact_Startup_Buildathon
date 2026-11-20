@@ -24,6 +24,14 @@ export function getApiBaseUrl(): string {
   return DEFAULT_API_BASE_URL
 }
 
+export function getCheckBaseUrl(): string {
+  const configured = import.meta.env.VITE_CHECK_BASE_URL
+  if (typeof configured === 'string' && configured.trim().length > 0) {
+    return configured.trim().replace(/\/+$/, '')
+  }
+  return getApiBaseUrl()
+}
+
 export class ApiClientError extends Error {
   status: number
   code: string
@@ -36,8 +44,8 @@ export class ApiClientError extends Error {
   }
 }
 
-async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
-  const url = `${getApiBaseUrl()}${path}`
+async function requestJson<T>(path: string, init?: RequestInit, baseUrl = getApiBaseUrl()): Promise<T> {
+  const url = `${baseUrl}${path}`
   const response = await fetch(url, init)
   if (!response.ok) {
     let code = `http_${response.status}`
@@ -121,17 +129,26 @@ export function createLiveEventSource(eventId: string): EventSource {
 }
 
 export async function submitCheck(payload: { text?: string; url?: string; image?: File }): Promise<CheckResponse> {
+  const checkBase = getCheckBaseUrl()
   if (payload.image) {
     const formData = new FormData()
     formData.append('image', payload.image)
-    return requestJson<CheckResponse>('/check', {
-      method: 'POST',
-      body: formData
-    })
+    return requestJson<CheckResponse>(
+      '/check',
+      {
+        method: 'POST',
+        body: formData
+      },
+      checkBase
+    )
   }
-  return requestJson<CheckResponse>('/check', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload.url ? { url: payload.url } : { text: payload.text ?? '' })
-  })
+  return requestJson<CheckResponse>(
+    '/check',
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload.url ? { url: payload.url } : { text: payload.text ?? '' })
+    },
+    checkBase
+  )
 }

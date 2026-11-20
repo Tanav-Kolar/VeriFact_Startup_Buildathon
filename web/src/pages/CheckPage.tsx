@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { useSearchParams } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { fetchEventDetail, fetchEvents, submitCheck } from '../api/client'
 import { ClaimCard } from '../components/ClaimCard'
 import { Header } from '../components/Header'
@@ -8,6 +8,7 @@ import type { CheckResponse, EventDetail } from '../types/api'
 type InputMode = 'text' | 'url' | 'image'
 
 export function CheckPage() {
+  const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const requestedEvent = searchParams.get('event')
 
@@ -180,7 +181,19 @@ export function CheckPage() {
               <p className="vf-muted-empty">No matching factual claims found in this input.</p>
             ) : (
               result.claims.map((claim) => (
-                <ClaimCard key={claim.claim_id} claim={claim} showDeepLink />
+                <ClaimCard
+                  key={claim.claim_id}
+                  claim={claim}
+                  showDeepLink
+                  onSelectItem={
+                    result.matched_event_id
+                      ? (itemId) =>
+                          navigate(
+                            `/e/${encodeURIComponent(result.matched_event_id!)}?item=${encodeURIComponent(itemId)}`
+                          )
+                      : undefined
+                  }
+                />
               ))
             )}
           </section>

@@ -64,8 +64,10 @@ export function ClaimCard({ claim, showDeepLink = false, onSelectItem }: ClaimCa
 
       <p className="vf-claim-text">{claim.text}</p>
 
-      {claim.self_reported && claim.self_reported_note ? (
-        <p className="vf-self-reported-note">{claim.self_reported_note}</p>
+      {claim.self_reported ? (
+        <p className="vf-self-reported-note">
+          {claim.self_reported_note || 'Company statement, not independently confirmed'}
+        </p>
       ) : null}
 
       <div className="vf-claim-counts" role="group" aria-label="Evidence counts by stance">

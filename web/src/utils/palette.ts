@@ -31,6 +31,20 @@ export function getStorylineColour(storylineId: string | null | undefined, colou
   return STORYLINE_PALETTE[idx]
 }
 
+export function hexToRgba(hex: string, alpha: number): string {
+  const clean = hex.replace('#', '')
+  if (clean.length !== 6) {
+    return `rgba(100, 116, 139, ${alpha})`
+  }
+  const r = Number.parseInt(clean.slice(0, 2), 16)
+  const g = Number.parseInt(clean.slice(2, 4), 16)
+  const b = Number.parseInt(clean.slice(4, 6), 16)
+  if ([r, g, b].some((v) => Number.isNaN(v))) {
+    return `rgba(100, 116, 139, ${alpha})`
+  }
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`
+}
+
 export function hashString(input: string): number {
   let hash = 2166136261
   for (let i = 0; i < input.length; i += 1) {

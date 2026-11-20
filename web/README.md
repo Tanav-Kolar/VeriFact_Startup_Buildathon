@@ -33,3 +33,12 @@ Event-agnostic Nebula narrative workspace built with **Vite**, **React 18**, **T
 | Variable | Description | Default |
 | --- | --- | --- |
 | `VITE_API_BASE_URL` | Base URL of the VeriFact `api` service | `http://localhost:8000` |
+| `VITE_CHECK_BASE_URL` | Optional base URL of the `check` service | Falls back to `VITE_API_BASE_URL` |
+
+## Container Build (Cloud Run)
+```bash
+docker build \
+  --build-arg VITE_API_BASE_URL=https://api.example.com \
+  --build-arg VITE_CHECK_BASE_URL=https://check.example.com \
+  -t verifact-web .
+```
