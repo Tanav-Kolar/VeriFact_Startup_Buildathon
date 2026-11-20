@@ -300,7 +300,8 @@ gdelt AS (
     CAST(NULL AS INT64) AS author_followers,
     COALESCE(
       SAFE.TIMESTAMP(JSON_VALUE(f.payload, '$.data.metadata["article:published_time"]')),
-      PARSE_TIMESTAMP('%Y%m%dT%H%M%SZ', JSON_VALUE(d.payload, '$.seendate'))
+      SAFE.PARSE_TIMESTAMP('%Y%m%dT%H%M%SZ', JSON_VALUE(d.payload, '$.seendate')),
+      SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', JSON_VALUE(d.payload, '$.seendate'))
     ) AS created_at,
     d.collected_at AS collected_at,
     CASE
@@ -327,7 +328,8 @@ gdelt AS (
         TIMESTAMP_DIFF(
           COALESCE(
             SAFE.TIMESTAMP(JSON_VALUE(f.payload, '$.data.metadata["article:published_time"]')),
-            PARSE_TIMESTAMP('%Y%m%dT%H%M%SZ', JSON_VALUE(d.payload, '$.seendate'))
+            SAFE.PARSE_TIMESTAMP('%Y%m%dT%H%M%SZ', JSON_VALUE(d.payload, '$.seendate')),
+            SAFE.PARSE_TIMESTAMP('%Y%m%d%H%M%S', JSON_VALUE(d.payload, '$.seendate'))
           ),
           t.t0,
           SECOND

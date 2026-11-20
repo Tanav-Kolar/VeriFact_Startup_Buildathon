@@ -220,7 +220,10 @@ export function WorkspacePage() {
 
   const { minHour, maxHour } = useMemo(() => {
     const frameHours = frames.map((f) => f.hour)
-    const min = frameHours.length > 0 ? Math.min(0, ...frameHours) : 0
+    const preT0DataHours = frames
+      .filter((f) => f.hour < 0 && f.nodes_added.length > 0)
+      .map((f) => f.hour)
+    const min = preT0DataHours.length > 0 ? Math.min(0, ...preT0DataHours) : 0
     const tpHours = (eventDetail?.turning_points ?? [])
       .map((tp) => computeHourFromT0(eventDetail?.t0_utc, tp.at_utc))
       .filter((h): h is number => h !== null)

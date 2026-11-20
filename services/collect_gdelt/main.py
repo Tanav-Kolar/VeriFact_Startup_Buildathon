@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import email.utils
 import hashlib
 import json
 import logging
 import sys
 import time
 import uuid
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -29,6 +31,7 @@ from verifact_core.queries import (
 logger = logging.getLogger("collect_gdelt")
 
 GDELT_DOC_ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc"
+GOOGLE_NEWS_RSS_ENDPOINT = "https://news.google.com/rss/search"
 SOURCE_NAME = "gdelt"
 MAX_RECORDS = 250
 MIN_SPLIT_WINDOW = timedelta(minutes=15)
@@ -285,6 +288,86 @@ def _collect_window_recursive(
     return written
 
 
+def _parse_rss_pubdate(raw: str | None) -> datetime | None:
+    if not raw or not raw.strip():
+        return None
+    try:
+        dt = email.utils.parsedate_to_datetime(raw.strip())
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _collect_google_news_rss(
+    cfg: EventConfig,
+    *,
+    run_id: str,
+    collected_at: datetime,
+    bounds: TimeBounds,
+    http_client: httpx.Client,
+    writer: WriterFn,
+) -> int:
+    """Fetch public Google News RSS articles for configured core/context queries."""
+    rss_queries = build_queries(cfg, SOURCE_NAME)[:6]
+    seen_hashes: set[str] = set()
+    rows: list[RawItem] = []
+
+    for q in rss_queries:
+        params = {"q": q.text, "hl": "en-IN", "gl": "IN", "ceid": "IN:en"}
+        try:
+            resp = http_client.get(GOOGLE_NEWS_RSS_ENDPOINT, params=params)
+            resp.raise_for_status()
+            root = ET.fromstring(resp.text)
+        except (httpx.HTTPError, ET.ParseError) as exc:
+            _log_json(logging.WARNING, "google_news_rss_error", query=q.text, error=str(exc))
+            continue
+
+        for item in root.findall(".//item"):
+            link = (item.findtext("link") or "").strip()
+            title = (item.findtext("title") or "").strip()
+            if not link or not title:
+                continue
+            pub_dt = _parse_rss_pubdate(item.findtext("pubDate"))
+            if pub_dt is None or not (bounds.window_start <= pub_dt <= bounds.window_end):
+                continue
+            source_el = item.find("source")
+            source_url = (source_el.attrib.get("url") if source_el is not None else "") or ""
+            source_name = (source_el.text or "").strip() if source_el is not None else ""
+            domain = urlsplit(source_url).netloc.lower() if source_url else urlsplit(link).netloc.lower()
+            src_hash = url_sha1(link)
+            if src_hash in seen_hashes:
+                continue
+            seen_hashes.add(src_hash)
+            payload = {
+                "url": link,
+                "title": title,
+                "domain": domain,
+                "source_name": source_name,
+                "seendate": pub_dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+                "language": "English",
+                "via": "google_news_rss",
+            }
+            rows.append(
+                RawItem(
+                    event_id=cfg.event_id,
+                    source=SOURCE_NAME,
+                    source_id=src_hash,
+                    query_id=f"rss:{q.query_id}",
+                    run_id=run_id,
+                    captured_by="api",
+                    collected_at=collected_at,
+                    payload=payload,
+                )
+            )
+
+    if not rows:
+        return 0
+    result = writer(rows, run_id=run_id)
+    return result.written
+
+
 def run_collector(
     cfg: EventConfig,
     *,
@@ -296,9 +379,12 @@ def run_collector(
     firestore_client: Any | None = None,
     writer: WriterFn = write_raw_items,
     rate_limiter: RateLimiter | None = None,
+    rss_only: bool = False,
 ) -> dict[str, Any]:
-    """Run the GDELT DOC 2.0 collector for one configured event."""
-    if cfg.sources.news is None or not cfg.sources.news.enabled or not cfg.sources.news.gdelt:
+    """Run the GDELT DOC 2.0 (and optional Google News RSS) collector for one configured event."""
+    if cfg.sources.news is None or not cfg.sources.news.enabled or (
+        not cfg.sources.news.gdelt and not cfg.sources.news.google_news_rss
+    ):
         _log_json(logging.INFO, "collector_disabled", event_id=cfg.event_id, source=SOURCE_NAME)
         return {"written": 0, "queries": 0, "skipped": True}
 
@@ -328,29 +414,41 @@ def run_collector(
     total_written = 0
 
     try:
-        for query in queries:
-            cursor_obj = get_cursor(cfg.event_id, SOURCE_NAME, query.query_id, client=firestore_client)
-            cursor_iso = cursor_obj.cursor if cursor_obj is not None else None
-            bounds = compute_time_bounds(
-                cfg, cursor_iso=cursor_iso, since_iso=since_iso, now=current_now
-            )
-            if not bounds.should_run or bounds.start >= bounds.end:
-                continue
+        if rss_only and cfg.sources.news.google_news_rss:
+            bounds = compute_time_bounds(cfg, since_iso=since_iso, now=current_now)
+            if bounds.should_run and bounds.start < bounds.end:
+                total_written += _collect_google_news_rss(
+                    cfg,
+                    run_id=active_run_id,
+                    collected_at=current_now,
+                    bounds=bounds,
+                    http_client=client,
+                    writer=writer,
+                )
+        else:
+            for query in queries:
+                cursor_obj = get_cursor(cfg.event_id, SOURCE_NAME, query.query_id, client=firestore_client)
+                cursor_iso = cursor_obj.cursor if cursor_obj is not None else None
+                bounds = compute_time_bounds(
+                    cfg, cursor_iso=cursor_iso, since_iso=since_iso, now=current_now
+                )
+                if not bounds.should_run or bounds.start >= bounds.end:
+                    continue
 
-            total_written += _collect_window_recursive(
-                cfg,
-                query.query_id,
-                query.text,
-                bounds.start,
-                bounds.end,
-                bounds,
-                run_id=active_run_id,
-                collected_at=current_now,
-                http_client=client,
-                limiter=limiter,
-                firestore_client=firestore_client,
-                writer=writer,
-            )
+                total_written += _collect_window_recursive(
+                    cfg,
+                    query.query_id,
+                    query.text,
+                    bounds.start,
+                    bounds.end,
+                    bounds,
+                    run_id=active_run_id,
+                    collected_at=current_now,
+                    http_client=client,
+                    limiter=limiter,
+                    firestore_client=firestore_client,
+                    writer=writer,
+                )
     finally:
         if owns_client:
             client.close()
@@ -376,14 +474,15 @@ def _configure_logging() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _configure_logging()
-    parser = argparse.ArgumentParser(description="GDELT DOC 2.0 collector")
+    parser = argparse.ArgumentParser(description="GDELT DOC 2.0 & Google News RSS collector")
     parser.add_argument("--event", required=True, help="Path to event YAML config")
     parser.add_argument("--dry-run", action="store_true", help="Print queries and bounds without API calls")
     parser.add_argument("--since", default=None, help="Override start timestamp (ISO-8601 UTC)")
+    parser.add_argument("--rss-only", action="store_true", help="Collect via Google News RSS only")
     args = parser.parse_args(argv)
 
     cfg = load_event(args.event)
-    run_collector(cfg, dry_run=args.dry_run, since_iso=args.since)
+    run_collector(cfg, dry_run=args.dry_run, since_iso=args.since, rss_only=args.rss_only)
     return 0
 
 
