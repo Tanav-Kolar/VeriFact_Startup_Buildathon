@@ -17,6 +17,7 @@ __pycache__/
 # Node
 node_modules/
 dist/
+frames_cache/
 
 # OS / editors
 .DS_Store

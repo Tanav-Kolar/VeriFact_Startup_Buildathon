@@ -116,13 +116,43 @@ def _row_identifier(row: dict[str, Any], idx: int) -> str:
     return f"row:{idx}"
 
 
+_JSON_COLUMNS_BY_TABLE: dict[str, tuple[str, ...]] = {
+    "raw_items": ("payload",),
+    "frames": ("nodes_added", "edges_added", "storyline_counts"),
+    "events": ("props",),
+}
+
+
+def _prepare_rows_for_bq_client(
+    bq_client: Any,
+    table_ref: str,
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Serialize JSON-typed columns to JSON strings when using a real BigQuery Client."""
+    if not type(bq_client).__module__.startswith("google.cloud.bigquery"):
+        return rows
+    short_table = table_ref.rsplit(".", 1)[-1]
+    json_cols = _JSON_COLUMNS_BY_TABLE.get(short_table, ())
+    if not json_cols:
+        return rows
+    prepared: list[dict[str, Any]] = []
+    for row in rows:
+        new_row = dict(row)
+        for col in json_cols:
+            if col in new_row and isinstance(new_row[col], (dict, list)):
+                new_row[col] = json.dumps(new_row[col], ensure_ascii=False)
+        prepared.append(new_row)
+    return prepared
+
+
 def _insert_json_batch(
     bq_client: Any,
     table_ref: str,
     batch_dicts: list[dict[str, Any]],
 ) -> tuple[int, list[tuple[int, str]]]:
     """Insert a batch of JSON dicts with retries; returns (written, [(orig_idx, reason), ...])."""
-    pending: list[tuple[int, dict[str, Any]]] = list(enumerate(batch_dicts))
+    prepared_dicts = _prepare_rows_for_bq_client(bq_client, table_ref, batch_dicts)
+    pending: list[tuple[int, dict[str, Any]]] = list(enumerate(prepared_dicts))
     last_reasons: dict[int, str] = {}
     written = 0
 

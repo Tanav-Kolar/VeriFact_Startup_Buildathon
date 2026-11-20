@@ -374,7 +374,8 @@ def render_prompt(
     claims_lines = (
         "\n".join(f"- {c.id}: {c.text}" for c in claims_to_check) if claims_to_check else "(none)"
     )
-    return template.replace("{claims_list}", claims_lines).replace("{item_text}", item_text)
+    bounded_text = item_text[:4000]
+    return template.replace("{claims_list}", claims_lines).replace("{item_text}", bounded_text)
 
 
 def _extract_run_claims(
@@ -576,6 +577,10 @@ class VertexModelRunner:
                         temperature=0.0,
                         response_mime_type="application/json",
                         response_schema=StanceResponse,
+                        thinking_config=genai_types.ThinkingConfig(thinking_budget=0),
+                        automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(
+                            disable=True
+                        ),
                     ),
                 )
 
@@ -955,6 +960,10 @@ def _process_text_groups(
                     done.append(item)
     except DailyCapReachedError:
         cap_tracker.cap_reached = True
+    except Exception as exc:  # noqa: BLE001
+        if not rows or not _is_retryable_error(exc):
+            raise
+        _log_json("enrich_partial_rate_limit", items_saved=len(rows), error=str(exc))
     return rows, done
 
 
