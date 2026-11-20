@@ -61,6 +61,16 @@ interface SpokeEdgeMeta {
   nodeId: string
   storylineId: string
   colour: string
+  pull: number
+}
+
+interface SimEdgeMeta {
+  key: string
+  source: string
+  target: string
+  storylineId: string
+  colour: string
+  dimmed: boolean
 }
 
 interface OverlayHub {
@@ -105,15 +115,16 @@ interface OverlayEdge {
 }
 
 const HUB_PREFIX = '__hub__:'
+const CLUSTER_MIN_ITEMS = 3
 const CONSTELLATION_RADIUS = 18
 const UNASSIGNED_HUB_POS = { hx: 0, hy: -3.5 }
 const SUB_NODE_MIN_SIZE = 3.0
-const SUB_NODE_MAX_SIZE = 7.5
-const HUB_MIN_SIZE = 14
+const SUB_NODE_MAX_SIZE = 6.5
 const HUB_MAX_SIZE = 24
 const SUB_NODE_MIN_DIST = 2.6
 const SUB_NODE_MAX_DIST = 6.2
 const MAX_RECENT_GLOW_OVERLAY = 240
+const TRANSITION_DURATION_MS = 360
 const GRAPH_BBOX = { x: [-26, 26] as [number, number], y: [-26, 26] as [number, number] }
 
 function computeHubPosition(
@@ -130,6 +141,17 @@ function computeHubPosition(
   return {
     hx: Math.cos(angle) * CONSTELLATION_RADIUS,
     hy: Math.sin(angle) * CONSTELLATION_RADIUS
+  }
+}
+
+function computeScatterCoords(node: GraphNodeData): { x: number; y: number } {
+  const h1 = hashString(`${node.id}:sx`)
+  const h2 = hashString(`${node.id}:sy`)
+  const angle = ((h1 % 10000) / 10000) * Math.PI * 2
+  const radius = 3 + Math.sqrt((h2 % 10000) / 10000) * 18
+  return {
+    x: Math.cos(angle) * radius,
+    y: Math.sin(angle) * radius
   }
 }
 
@@ -177,13 +199,17 @@ function computeReplySubNodeCoords(
 
 function computeNodeBaseSize(reach: number | null, scale: number): number {
   const safeReach = typeof reach === 'number' && reach > 0 ? reach : 1
-  const raw = 3.0 + Math.min(4.5, Math.log10(safeReach + 1) * 0.65)
+  const raw = 3.0 + Math.min(3.5, Math.log10(safeReach + 1) * 0.52)
   return Math.max(SUB_NODE_MIN_SIZE, Math.min(SUB_NODE_MAX_SIZE, raw * scale))
 }
 
 function computeHubSize(count: number): number {
-  const raw = 12 + Math.log2(Math.max(1, count) + 1) * 1.6
-  return Math.max(HUB_MIN_SIZE, Math.min(HUB_MAX_SIZE, raw))
+  const raw = 7.5 + Math.log2(Math.max(2, count - 1)) * 3.8
+  return Math.min(HUB_MAX_SIZE, raw)
+}
+
+function computeCoalescencePull(count: number): number {
+  return Math.min(1, 0.4 + (count - CLUSTER_MIN_ITEMS) * 0.15)
 }
 
 function formatHubPillLabel(name: string, count: number): string {
@@ -212,6 +238,7 @@ export function NebulaGraph({
   const graphRef = useRef<Graph | null>(null)
   const sigmaRef = useRef<Sigma | null>(null)
   const hadNodesRef = useRef(false)
+  const rafIdRef = useRef<number | null>(null)
 
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [hoveredNode, setHoveredNode] = useState<GraphNodeData | null>(null)
@@ -223,7 +250,7 @@ export function NebulaGraph({
   const [settings, setSettings] = useState<GraphViewSettings>({
     nodeSizeScale: 1,
     showLinks: true,
-    linkOpacity: 0.35,
+    linkOpacity: 0.2,
     showLabels: false,
     enabledPlatforms: []
   })
@@ -293,171 +320,237 @@ export function NebulaGraph({
     }
   }, [storylines, frames])
 
-  // Accumulate hubs, sub-nodes, spoke edges, and graph edges strictly up to currentHour
-  const { visibleHubs, visibleNodes, visibleEdges, spokeEdges, hubMap, nodeMap, spokeEdgeMap } =
-    useMemo(() => {
-      const allowedPlatforms =
-        settings.enabledPlatforms.length > 0
-          ? new Set(settings.enabledPlatforms.map((p) => p.toLowerCase()))
-          : null
+  // Accumulate emergent hubs (count >= 3), sub-nodes, similarity bridges (count === 2), and spokes up to currentHour
+  const {
+    visibleHubs,
+    visibleNodes,
+    visibleEdges,
+    spokeEdges,
+    simEdges,
+    emergingStorylineCount,
+    hubMap,
+    nodeMap,
+    spokeEdgeMap,
+    simEdgeMap
+  } = useMemo(() => {
+    const allowedPlatforms =
+      settings.enabledPlatforms.length > 0
+        ? new Set(settings.enabledPlatforms.map((p) => p.toLowerCase()))
+        : null
 
-      const rawNodesById = new Map<string, GraphNodeData>()
-      const rawEdges: GraphEdgeData[] = []
+    const rawNodesById = new Map<string, GraphNodeData>()
+    const rawEdges: GraphEdgeData[] = []
 
-      const sortedFrames = [...frames]
-        .filter((f) => f.hour <= currentHour)
-        .sort((a, b) => a.hour - b.hour)
+    const sortedFrames = [...frames]
+      .filter((f) => f.hour <= currentHour)
+      .sort((a, b) => a.hour - b.hour)
 
-      for (const frame of sortedFrames) {
-        for (const n of frame.nodes_added) {
-          if (n.hour > currentHour) continue
-          if (allowedPlatforms && !allowedPlatforms.has(n.platform.toLowerCase())) continue
-          rawNodesById.set(n.id, n)
-        }
-
-        for (const e of frame.edges_added) {
-          if (e.hour <= currentHour) {
-            rawEdges.push(e)
-          }
-        }
+    for (const frame of sortedFrames) {
+      for (const n of frame.nodes_added) {
+        if (n.hour > currentHour) continue
+        if (allowedPlatforms && !allowedPlatforms.has(n.platform.toLowerCase())) continue
+        rawNodesById.set(n.id, n)
       }
 
-      // Group visible sub-nodes by storylineId
-      const groupedByStoryline = new Map<string, GraphNodeData[]>()
-      for (const n of rawNodesById.values()) {
-        const sid = n.storyline_id ?? 'unassigned'
-        const bucket = groupedByStoryline.get(sid)
-        if (bucket) {
-          bucket.push(n)
-        } else {
-          groupedByStoryline.set(sid, [n])
+      for (const e of frame.edges_added) {
+        if (e.hour <= currentHour) {
+          rawEdges.push(e)
         }
       }
+    }
 
-      // Build parent reply/quote lookup within the same storyline so sub-threads stay tightly fanned
-      const parentByChildId = new Map<string, string>()
-      for (const e of rawEdges) {
-        if (e.type !== 'replied_to' && e.type !== 'quoted') continue
-        if (e.source === e.target || parentByChildId.has(e.source)) continue
-        const srcNode = rawNodesById.get(e.source)
-        const tgtNode = rawNodesById.get(e.target)
-        if (!srcNode || !tgtNode) continue
-        const srcSid = srcNode.storyline_id ?? 'unassigned'
-        const tgtSid = tgtNode.storyline_id ?? 'unassigned'
-        if (srcSid === tgtSid) {
-          parentByChildId.set(e.source, e.target)
-        }
+    // Group visible sub-nodes by storylineId
+    const groupedByStoryline = new Map<string, GraphNodeData[]>()
+    for (const n of rawNodesById.values()) {
+      const sid = n.storyline_id ?? 'unassigned'
+      const bucket = groupedByStoryline.get(sid)
+      if (bucket) {
+        bucket.push(n)
+      } else {
+        groupedByStoryline.set(sid, [n])
       }
+    }
 
-      const hubsById = new Map<string, PositionedHub>()
-      const nodesById = new Map<string, PositionedNode>()
-      const spokes: SpokeEdgeMeta[] = []
-      const spokesByKey = new Map<string, SpokeEdgeMeta>()
+    // Build parent reply/quote lookup within the same storyline so sub-threads stay tightly fanned
+    const parentByChildId = new Map<string, string>()
+    for (const e of rawEdges) {
+      if (e.type !== 'replied_to' && e.type !== 'quoted') continue
+      if (e.source === e.target || parentByChildId.has(e.source)) continue
+      const srcNode = rawNodesById.get(e.source)
+      const tgtNode = rawNodesById.get(e.target)
+      if (!srcNode || !tgtNode) continue
+      const srcSid = srcNode.storyline_id ?? 'unassigned'
+      const tgtSid = tgtNode.storyline_id ?? 'unassigned'
+      if (srcSid === tgtSid) {
+        parentByChildId.set(e.source, e.target)
+      }
+    }
 
-      for (const [storylineId, items] of groupedByStoryline.entries()) {
-        if (items.length === 0) continue
+    const hubsById = new Map<string, PositionedHub>()
+    const nodesById = new Map<string, PositionedNode>()
+    const spokes: SpokeEdgeMeta[] = []
+    const spokesByKey = new Map<string, SpokeEdgeMeta>()
+    const sims: SimEdgeMeta[] = []
+    const simsByKey = new Map<string, SimEdgeMeta>()
+    let emergingCount = 0
 
-        const hubId = `${HUB_PREFIX}${storylineId}`
-        const { hx, hy } = computeHubPosition(storylineId, storylineOrderMap)
-        const hubColour = getStorylineColour(
-          storylineId,
-          storylineColourIndexMap.get(storylineId)
-        )
-        const dimmed = focusedStorylineId !== null && focusedStorylineId !== storylineId
+    for (const [storylineId, items] of groupedByStoryline.entries()) {
+      if (items.length === 0) continue
 
-        hubsById.set(hubId, {
-          id: hubId,
-          storylineId,
-          name: storylineNameMap.get(storylineId) ?? storylineId,
-          count: items.length,
-          hx,
-          hy,
-          size: computeHubSize(items.length),
-          colour: hubColour,
-          dimmed
-        })
+      const storylineColour = getStorylineColour(
+        storylineId,
+        storylineColourIndexMap.get(storylineId)
+      )
+      const dimmed = focusedStorylineId !== null && focusedStorylineId !== storylineId
+      const isClustered = items.length >= CLUSTER_MIN_ITEMS
 
-        // Memoized sub-node positioning keeping replies clustered near their parent post
-        const resolvedCoords = new Map<string, { x: number; y: number }>()
-        const resolveCoords = (
-          nodeId: string,
-          visiting: Set<string>,
-          depth: number
-        ): { x: number; y: number } => {
-          const cached = resolvedCoords.get(nodeId)
-          if (cached) return cached
+      if (!isClustered) {
+        emergingCount += 1
 
-          const node = rawNodesById.get(nodeId)
-          if (!node) return { x: hx, y: hy }
-
-          const parentId = parentByChildId.get(nodeId)
-          if (parentId && depth < 6 && !visiting.has(parentId)) {
-            visiting.add(nodeId)
-            const parentPos = resolveCoords(parentId, visiting, depth + 1)
-            const coords = computeReplySubNodeCoords(node, parentPos, hx, hy)
-            resolvedCoords.set(nodeId, coords)
-            return coords
-          }
-
-          const rootCoords = computeRootSubNodeCoords(node, hx, hy)
-          resolvedCoords.set(nodeId, rootCoords)
-          return rootCoords
-        }
-
+        // Pre-cluster stage (count < 3): scatter small data points across the field
         for (const n of items) {
-          const coords = resolveCoords(n.id, new Set<string>(), 0)
+          const scatter = computeScatterCoords(n)
           const isRecent = currentHour - n.hour >= 0 && currentHour - n.hour < 2
           const isNewArrival = n.hour === currentHour
-          const baseColour = n.is_response ? RESPONSE_GOLD_COLOUR : hubColour
+          const baseColour = n.is_response ? RESPONSE_GOLD_COLOUR : storylineColour
 
           nodesById.set(n.id, {
             data: n,
             storylineId,
-            x: coords.x,
-            y: coords.y,
+            x: scatter.x,
+            y: scatter.y,
             size: computeNodeBaseSize(n.reach, settings.nodeSizeScale),
             baseColour,
             dimmed,
             isRecent,
             isNewArrival
           })
-
-          const spokeKey = `spoke:${storylineId}:${n.id}`
-          const spokeMeta: SpokeEdgeMeta = {
-            key: spokeKey,
-            hubId,
-            nodeId: n.id,
-            storylineId,
-            colour: hubColour
-          }
-          spokes.push(spokeMeta)
-          spokesByKey.set(spokeKey, spokeMeta)
         }
+
+        // At count === 2, surface a similarity bridge edge before the hub condenses
+        if (items.length === 2) {
+          const sortedPair = [...items].sort((a, b) => a.id.localeCompare(b.id))
+          const simKey = `__sim__:${sortedPair[0].id}:${sortedPair[1].id}`
+          const simMeta: SimEdgeMeta = {
+            key: simKey,
+            source: sortedPair[0].id,
+            target: sortedPair[1].id,
+            storylineId,
+            colour: storylineColour,
+            dimmed
+          }
+          sims.push(simMeta)
+          simsByKey.set(simKey, simMeta)
+        }
+        continue
       }
 
-      const filteredEdges = rawEdges.filter(
-        (e) => nodesById.has(e.source) && nodesById.has(e.target) && e.source !== e.target
-      )
+      // Emergent cluster stage (count >= 3): pull items from scatter field toward hub orbit
+      const hubId = `${HUB_PREFIX}${storylineId}`
+      const { hx, hy } = computeHubPosition(storylineId, storylineOrderMap)
+      const pull = computeCoalescencePull(items.length)
 
-      return {
-        visibleHubs: Array.from(hubsById.values()),
-        visibleNodes: Array.from(nodesById.values()),
-        visibleEdges: filteredEdges,
-        spokeEdges: spokes,
-        hubMap: hubsById,
-        nodeMap: nodesById,
-        spokeEdgeMap: spokesByKey
+      hubsById.set(hubId, {
+        id: hubId,
+        storylineId,
+        name: storylineNameMap.get(storylineId) ?? storylineId,
+        count: items.length,
+        hx,
+        hy,
+        size: computeHubSize(items.length),
+        colour: storylineColour,
+        dimmed
+      })
+
+      // Memoized cluster orbit positioning keeping replies clustered near their parent post
+      const resolvedClusterCoords = new Map<string, { x: number; y: number }>()
+      const resolveClusterCoords = (
+        nodeId: string,
+        visiting: Set<string>,
+        depth: number
+      ): { x: number; y: number } => {
+        const cached = resolvedClusterCoords.get(nodeId)
+        if (cached) return cached
+
+        const node = rawNodesById.get(nodeId)
+        if (!node) return { x: hx, y: hy }
+
+        const parentId = parentByChildId.get(nodeId)
+        if (parentId && depth < 6 && !visiting.has(parentId)) {
+          visiting.add(nodeId)
+          const parentPos = resolveClusterCoords(parentId, visiting, depth + 1)
+          const coords = computeReplySubNodeCoords(node, parentPos, hx, hy)
+          resolvedClusterCoords.set(nodeId, coords)
+          return coords
+        }
+
+        const rootCoords = computeRootSubNodeCoords(node, hx, hy)
+        resolvedClusterCoords.set(nodeId, rootCoords)
+        return rootCoords
       }
-    }, [
-      frames,
-      currentHour,
-      focusedStorylineId,
-      settings.enabledPlatforms,
-      settings.nodeSizeScale,
-      storylineColourIndexMap,
-      storylineNameMap,
-      storylineOrderMap
-    ])
+
+      for (const n of items) {
+        const scatter = computeScatterCoords(n)
+        const cluster = resolveClusterCoords(n.id, new Set<string>(), 0)
+        const targetX = scatter.x + (cluster.x - scatter.x) * pull
+        const targetY = scatter.y + (cluster.y - scatter.y) * pull
+
+        const isRecent = currentHour - n.hour >= 0 && currentHour - n.hour < 2
+        const isNewArrival = n.hour === currentHour
+        const baseColour = n.is_response ? RESPONSE_GOLD_COLOUR : storylineColour
+
+        nodesById.set(n.id, {
+          data: n,
+          storylineId,
+          x: targetX,
+          y: targetY,
+          size: computeNodeBaseSize(n.reach, settings.nodeSizeScale),
+          baseColour,
+          dimmed,
+          isRecent,
+          isNewArrival
+        })
+
+        const spokeKey = `spoke:${storylineId}:${n.id}`
+        const spokeMeta: SpokeEdgeMeta = {
+          key: spokeKey,
+          hubId,
+          nodeId: n.id,
+          storylineId,
+          colour: storylineColour,
+          pull
+        }
+        spokes.push(spokeMeta)
+        spokesByKey.set(spokeKey, spokeMeta)
+      }
+    }
+
+    const filteredEdges = rawEdges.filter(
+      (e) => nodesById.has(e.source) && nodesById.has(e.target) && e.source !== e.target
+    )
+
+    return {
+      visibleHubs: Array.from(hubsById.values()),
+      visibleNodes: Array.from(nodesById.values()),
+      visibleEdges: filteredEdges,
+      spokeEdges: spokes,
+      simEdges: sims,
+      emergingStorylineCount: emergingCount,
+      hubMap: hubsById,
+      nodeMap: nodesById,
+      spokeEdgeMap: spokesByKey,
+      simEdgeMap: simsByKey
+    }
+  }, [
+    frames,
+    currentHour,
+    focusedStorylineId,
+    settings.enabledPlatforms,
+    settings.nodeSizeScale,
+    storylineColourIndexMap,
+    storylineNameMap,
+    storylineOrderMap
+  ])
 
   // Keep latest state in refs for persistent Sigma reducers and event handlers
   const hubMapRef = useRef(hubMap)
@@ -468,6 +561,8 @@ export function NebulaGraph({
   visibleEdgesRef.current = visibleEdges
   const spokeEdgeMapRef = useRef(spokeEdgeMap)
   spokeEdgeMapRef.current = spokeEdgeMap
+  const simEdgeMapRef = useRef(simEdgeMap)
+  simEdgeMapRef.current = simEdgeMap
   const focusedStorylineIdRef = useRef(focusedStorylineId)
   focusedStorylineIdRef.current = focusedStorylineId
   const selectedNodeIdRef = useRef(selectedNodeId)
@@ -507,16 +602,32 @@ export function NebulaGraph({
 
   const syncOverlay = useCallback(() => {
     const sigma = sigmaRef.current
-    if (!sigma) return
+    const graph = graphRef.current
+    if (!sigma || !graph) return
 
     const currentSelected = selectedNodeIdRef.current
     const currentHovered = hoveredNodeIdRef.current
     const currentFocused = focusedStorylineIdRef.current
 
+    const getLivePos = (id: string, fallbackX: number, fallbackY: number) => {
+      if (graph.hasNode(id)) {
+        const gx = graph.getNodeAttribute(id, 'x')
+        const gy = graph.getNodeAttribute(id, 'y')
+        if (typeof gx === 'number' && typeof gy === 'number') {
+          return { x: gx, y: gy }
+        }
+      }
+      return { x: fallbackX, y: fallbackY }
+    }
+
     const hubs: OverlayHub[] = []
     for (const hub of hubMapRef.current.values()) {
-      const vp = sigma.graphToViewport({ x: hub.hx, y: hub.hy })
-      const renderedSize = Math.max(10, sigma.scaleSize(hub.size))
+      const livePos = getLivePos(hub.id, hub.hx, hub.hy)
+      const liveSize = graph.hasNode(hub.id)
+        ? Number(graph.getNodeAttribute(hub.id, 'size') ?? hub.size)
+        : hub.size
+      const vp = sigma.graphToViewport(livePos)
+      const renderedSize = Math.max(8, sigma.scaleSize(liveSize))
       hubs.push({
         id: hub.id,
         storylineId: hub.storylineId,
@@ -524,7 +635,7 @@ export function NebulaGraph({
         count: hub.count,
         vx: vp.x,
         vy: vp.y,
-        hy: hub.hy,
+        hy: livePos.y,
         size: renderedSize,
         colour: hub.colour,
         dimmed: hub.dimmed,
@@ -553,7 +664,8 @@ export function NebulaGraph({
       if (!shouldDrawSpecial) continue
       if (includeRecentGlow) recentGlowCount += 1
 
-      const vp = sigma.graphToViewport({ x: item.x, y: item.y })
+      const livePos = getLivePos(item.data.id, item.x, item.y)
+      const vp = sigma.graphToViewport(livePos)
       const renderedSize = Math.max(2.5, sigma.scaleSize(item.size))
       points.push({
         id: item.data.id,
@@ -578,8 +690,8 @@ export function NebulaGraph({
         const src = nodeMapRef.current.get(edge.source)
         const dst = nodeMapRef.current.get(edge.target)
         if (!src || !dst) return
-        const p1 = sigma.graphToViewport({ x: src.x, y: src.y })
-        const p2 = sigma.graphToViewport({ x: dst.x, y: dst.y })
+        const p1 = sigma.graphToViewport(getLivePos(edge.source, src.x, src.y))
+        const p2 = sigma.graphToViewport(getLivePos(edge.target, dst.x, dst.y))
         const highlighted =
           currentHovered !== null &&
           (edge.source === currentHovered || edge.target === currentHovered)
@@ -615,7 +727,7 @@ export function NebulaGraph({
       labelDensity: 0.5,
       labelSize: 11,
       defaultNodeColor: '#64748b',
-      defaultEdgeColor: 'rgba(148, 163, 184, 0.2)',
+      defaultEdgeColor: 'rgba(148, 163, 184, 0.20)',
       allowInvalidContainer: true,
       zIndex: true,
       nodeReducer: (node, data) => {
@@ -628,8 +740,9 @@ export function NebulaGraph({
           const sameStorylineAsHovered =
             hoveredSub !== undefined && hoveredSub.storylineId === hub.storylineId
 
+          const liveSize = typeof data.size === 'number' ? data.size : hub.size
           let color = hub.colour
-          let size = hub.size
+          let size = liveSize
           let zIndex = isFocused ? 4 : 3
 
           if (hub.dimmed) {
@@ -641,7 +754,7 @@ export function NebulaGraph({
           }
 
           if (isHovered) {
-            size = hub.size * 1.1
+            size = liveSize * 1.1
             zIndex = 5
           }
 
@@ -701,6 +814,35 @@ export function NebulaGraph({
         const hoveredId = hoveredNodeIdRef.current
         const isIncidentHover = hoveredId !== null && (srcId === hoveredId || dstId === hoveredId)
 
+        const simMeta = simEdgeMapRef.current.get(edge)
+        if (simMeta) {
+          if (simMeta.dimmed) {
+            return {
+              ...data,
+              hidden: false,
+              size: 0.6,
+              color: hexToRgba(simMeta.colour, 0.06),
+              zIndex: 0
+            }
+          }
+          if (isIncidentHover) {
+            return {
+              ...data,
+              hidden: false,
+              size: 1.4,
+              color: hexToRgba(simMeta.colour, 0.72),
+              zIndex: 2
+            }
+          }
+          return {
+            ...data,
+            hidden: false,
+            size: 1.0,
+            color: hexToRgba(simMeta.colour, 0.4),
+            zIndex: 1
+          }
+        }
+
         const spokeMeta = spokeEdgeMapRef.current.get(edge)
         if (spokeMeta) {
           const hubNode = hubMapRef.current.get(spokeMeta.hubId)
@@ -711,7 +853,7 @@ export function NebulaGraph({
             return {
               ...data,
               hidden: false,
-              size: 0.45,
+              size: 0.4,
               color: hexToRgba(spokeMeta.colour, 0.03),
               zIndex: 0
             }
@@ -720,8 +862,8 @@ export function NebulaGraph({
             return {
               ...data,
               hidden: false,
-              size: 1.2,
-              color: hexToRgba(spokeMeta.colour, 0.65),
+              size: 1.15,
+              color: hexToRgba(spokeMeta.colour, 0.6),
               zIndex: 2
             }
           }
@@ -729,18 +871,18 @@ export function NebulaGraph({
             return {
               ...data,
               hidden: false,
-              size: 0.5,
-              color: hexToRgba(spokeMeta.colour, 0.06),
+              size: 0.45,
+              color: hexToRgba(spokeMeta.colour, 0.05),
               zIndex: 0
             }
           }
-          const spokeAlpha =
-            focusedStorylineIdRef.current === spokeMeta.storylineId ? 0.26 : 0.18
+          const baseSpokeAlpha = (0.08 + 0.12 * spokeMeta.pull) *
+            (focusedStorylineIdRef.current === spokeMeta.storylineId ? 1.35 : 1)
           return {
             ...data,
             hidden: false,
-            size: 0.7,
-            color: hexToRgba(spokeMeta.colour, spokeAlpha),
+            size: 0.45 + 0.3 * spokeMeta.pull,
+            color: hexToRgba(spokeMeta.colour, Math.min(0.28, baseSpokeAlpha)),
             zIndex: 1
           }
         }
@@ -748,34 +890,38 @@ export function NebulaGraph({
         const srcNode = nodeMapRef.current.get(srcId)
         const dstNode = nodeMapRef.current.get(dstId)
         const isDimmed = Boolean(srcNode?.dimmed || dstNode?.dimmed)
+        const isFocusedClusterEdge =
+          focusedStorylineIdRef.current !== null && !isDimmed
 
         if (isDimmed) {
           return {
             ...data,
             hidden: false,
-            size: 0.6,
-            color: 'rgba(148, 163, 184, 0.08)',
+            size: 0.5,
+            color: 'rgba(148, 163, 184, 0.05)',
             zIndex: 0
           }
         }
-        if (isIncidentHover) {
+        if (isIncidentHover || isFocusedClusterEdge) {
           return {
             ...data,
             hidden: false,
-            size: 1.4,
-            color: 'rgba(226, 232, 240, 0.72)',
+            size: isIncidentHover ? 1.25 : 0.85,
+            color: isIncidentHover
+              ? 'rgba(203, 213, 225, 0.55)'
+              : 'rgba(203, 213, 225, 0.35)',
             zIndex: 2
           }
         }
-        const alpha =
+        const calmAlpha =
           hoveredId !== null
-            ? Math.min(0.14, settingsRef.current.linkOpacity)
-            : settingsRef.current.linkOpacity
+            ? Math.min(0.1, settingsRef.current.linkOpacity)
+            : Math.min(0.22, settingsRef.current.linkOpacity)
         return {
           ...data,
           hidden: false,
-          size: 0.8,
-          color: `rgba(148, 163, 184, ${alpha.toFixed(2)})`,
+          size: 0.7,
+          color: `rgba(148, 163, 184, ${calmAlpha.toFixed(2)})`,
           zIndex: 1
         }
       }
@@ -831,17 +977,26 @@ export function NebulaGraph({
     })
 
     return () => {
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current)
+        rafIdRef.current = null
+      }
       sigma.kill()
       sigmaRef.current = null
       graphRef.current = null
     }
   }, [syncOverlay, triggerHubFocus])
 
-  // Incrementally sync Graphology nodes & edges when hubs / visibleNodes / visibleEdges change
+  // Incrementally sync Graphology nodes & edges and smoothly animate coalescence transitions
   useEffect(() => {
     const graph = graphRef.current
     const sigma = sigmaRef.current
     if (!graph || !sigma) return
+
+    if (rafIdRef.current !== null) {
+      window.cancelAnimationFrame(rafIdRef.current)
+      rafIdRef.current = null
+    }
 
     const desiredNodeIds = new Set<string>([
       ...visibleHubs.map((h) => h.id),
@@ -854,31 +1009,60 @@ export function NebulaGraph({
       }
     }
 
+    const hubAnimations: Array<{ id: string; fromSize: number; toSize: number }> = []
     for (const hub of visibleHubs) {
       if (graph.hasNode(hub.id)) {
+        const prevSize = Number(graph.getNodeAttribute(hub.id, 'size') ?? hub.size)
         graph.setNodeAttribute(hub.id, 'x', hub.hx)
         graph.setNodeAttribute(hub.id, 'y', hub.hy)
-        graph.setNodeAttribute(hub.id, 'size', hub.size)
         graph.setNodeAttribute(hub.id, 'color', hub.colour)
         graph.setNodeAttribute(hub.id, 'label', '')
+        if (Math.abs(prevSize - hub.size) > 0.1) {
+          hubAnimations.push({ id: hub.id, fromSize: prevSize, toSize: hub.size })
+        } else {
+          graph.setNodeAttribute(hub.id, 'size', hub.size)
+        }
       } else {
+        const startSize = Math.max(4, hub.size * 0.45)
         graph.addNode(hub.id, {
           x: hub.hx,
           y: hub.hy,
-          size: hub.size,
+          size: startSize,
           color: hub.colour,
           label: ''
         })
+        hubAnimations.push({ id: hub.id, fromSize: startSize, toSize: hub.size })
       }
     }
 
+    const nodeAnimations: Array<{
+      id: string
+      fromX: number
+      fromY: number
+      toX: number
+      toY: number
+    }> = []
+
     for (const item of visibleNodes) {
       if (graph.hasNode(item.data.id)) {
-        graph.setNodeAttribute(item.data.id, 'x', item.x)
-        graph.setNodeAttribute(item.data.id, 'y', item.y)
+        const prevX = Number(graph.getNodeAttribute(item.data.id, 'x') ?? item.x)
+        const prevY = Number(graph.getNodeAttribute(item.data.id, 'y') ?? item.y)
         graph.setNodeAttribute(item.data.id, 'size', item.size)
         graph.setNodeAttribute(item.data.id, 'color', item.baseColour)
         graph.setNodeAttribute(item.data.id, 'label', item.data.label)
+
+        if (Math.hypot(item.x - prevX, item.y - prevY) > 0.02) {
+          nodeAnimations.push({
+            id: item.data.id,
+            fromX: prevX,
+            fromY: prevY,
+            toX: item.x,
+            toY: item.y
+          })
+        } else {
+          graph.setNodeAttribute(item.data.id, 'x', item.x)
+          graph.setNodeAttribute(item.data.id, 'y', item.y)
+        }
       } else {
         graph.addNode(item.data.id, {
           x: item.x,
@@ -894,6 +1078,9 @@ export function NebulaGraph({
     for (const spoke of spokeEdges) {
       desiredEdgeKeys.add(spoke.key)
     }
+    for (const sim of simEdges) {
+      desiredEdgeKeys.add(sim.key)
+    }
     const desiredGraphEdges = new Map<string, GraphEdgeData>()
     visibleEdges.forEach((edge, idx) => {
       if (edge.type === 'links_to' || edge.type === 'contradicts') return
@@ -908,11 +1095,20 @@ export function NebulaGraph({
       }
     }
 
+    for (const sim of simEdges) {
+      if (!graph.hasEdge(sim.key) && graph.hasNode(sim.source) && graph.hasNode(sim.target)) {
+        graph.addEdgeWithKey(sim.key, sim.source, sim.target, {
+          size: 1.0,
+          color: hexToRgba(sim.colour, 0.4)
+        })
+      }
+    }
+
     for (const spoke of spokeEdges) {
       if (!graph.hasEdge(spoke.key) && graph.hasNode(spoke.hubId) && graph.hasNode(spoke.nodeId)) {
         graph.addEdgeWithKey(spoke.key, spoke.hubId, spoke.nodeId, {
-          size: 0.7,
-          color: hexToRgba(spoke.colour, 0.18)
+          size: 0.65,
+          color: hexToRgba(spoke.colour, 0.16)
         })
       }
     }
@@ -920,8 +1116,8 @@ export function NebulaGraph({
     for (const [key, edge] of desiredGraphEdges.entries()) {
       if (!graph.hasEdge(key) && graph.hasNode(edge.source) && graph.hasNode(edge.target)) {
         graph.addEdgeWithKey(key, edge.source, edge.target, {
-          size: 0.8,
-          color: 'rgba(148, 163, 184, 0.3)'
+          size: 0.7,
+          color: 'rgba(148, 163, 184, 0.20)'
         })
       }
     }
@@ -935,7 +1131,47 @@ export function NebulaGraph({
       hadNodesRef.current = false
     }
     syncOverlay()
-  }, [visibleHubs, visibleNodes, visibleEdges, spokeEdges, syncOverlay])
+
+    if (nodeAnimations.length > 0 || hubAnimations.length > 0) {
+      const startTime = performance.now()
+      const step = (now: number) => {
+        const g = graphRef.current
+        const s = sigmaRef.current
+        if (!g || !s) return
+
+        const progress = Math.min(1, (now - startTime) / TRANSITION_DURATION_MS)
+        const eased = 1 - Math.pow(1 - progress, 3)
+
+        for (const anim of nodeAnimations) {
+          if (!g.hasNode(anim.id)) continue
+          g.setNodeAttribute(anim.id, 'x', anim.fromX + (anim.toX - anim.fromX) * eased)
+          g.setNodeAttribute(anim.id, 'y', anim.fromY + (anim.toY - anim.fromY) * eased)
+        }
+        for (const anim of hubAnimations) {
+          if (!g.hasNode(anim.id)) continue
+          g.setNodeAttribute(anim.id, 'size', anim.fromSize + (anim.toSize - anim.fromSize) * eased)
+        }
+
+        s.refresh()
+        syncOverlay()
+
+        if (progress < 1) {
+          rafIdRef.current = window.requestAnimationFrame(step)
+        } else {
+          rafIdRef.current = null
+        }
+      }
+
+      rafIdRef.current = window.requestAnimationFrame(step)
+    }
+
+    return () => {
+      if (rafIdRef.current !== null) {
+        window.cancelAnimationFrame(rafIdRef.current)
+        rafIdRef.current = null
+      }
+    }
+  }, [visibleHubs, visibleNodes, visibleEdges, spokeEdges, simEdges, syncOverlay])
 
   // Refresh Sigma styling without rebuilding graph when hover, focus, selection, or display settings change
   useEffect(() => {
@@ -981,11 +1217,7 @@ export function NebulaGraph({
     return { firstDataHour: first, latestDataHour: latest }
   }, [frames])
 
-  const activeStorylineCount = useMemo(() => {
-    const namedActive = visibleHubs.filter((h) => h.storylineId !== 'unassigned').length
-    return namedActive > 0 ? namedActive : visibleHubs.length
-  }, [visibleHubs])
-
+  const clusterCount = visibleHubs.length
   const focusedStorylineName = focusedStorylineId
     ? (storylineNameMap.get(focusedStorylineId) ?? focusedStorylineId)
     : null
@@ -1005,10 +1237,10 @@ export function NebulaGraph({
             y1={edge.y1}
             x2={edge.x2}
             y2={edge.y2}
-            stroke={edge.kind === 'contradicts' ? '#facc15' : '#e2e8f0'}
-            strokeWidth={edge.highlighted ? 2.2 : edge.kind === 'contradicts' ? 1.5 : 1.25}
+            stroke={edge.kind === 'contradicts' ? '#facc15' : '#94a3b8'}
+            strokeWidth={edge.highlighted ? 1.8 : edge.kind === 'contradicts' ? 1.4 : 1.0}
             strokeDasharray={edge.kind === 'contradicts' ? '2 4' : '5 4'}
-            strokeOpacity={edge.dimmed ? 0.12 : edge.highlighted ? 0.95 : 0.72}
+            strokeOpacity={edge.dimmed ? 0.06 : edge.highlighted ? 0.72 : 0.3}
           />
         ))}
 
@@ -1082,7 +1314,7 @@ export function NebulaGraph({
               <circle r={r} fill="none" stroke="#0b1120" strokeWidth={1.5} />
 
               <g
-                className="vf-hub-pill-group"
+                className={`vf-hub-pill${hub.isFocused ? ' is-focused' : ''}`}
                 onClick={(e) => {
                   e.stopPropagation()
                   triggerHubFocus(hub.storylineId)
@@ -1096,22 +1328,22 @@ export function NebulaGraph({
                 }}
               >
                 <rect
+                  className="vf-hub-pill-bg"
                   x={-pillWidth / 2}
                   y={pillY - 11}
                   width={pillWidth}
                   height={22}
                   rx={11}
-                  fill="rgba(5, 8, 17, 0.9)"
                   stroke={hexToRgba(hub.colour, hub.isFocused || hub.isHovered ? 0.95 : 0.55)}
                   strokeWidth={hub.isFocused || hub.isHovered ? 1.5 : 1}
                 />
                 <circle cx={-pillWidth / 2 + 11} cy={pillY} r={3.5} fill={hub.colour} />
                 <text
+                  className="vf-hub-pill-text"
                   x={-pillWidth / 2 + 20}
                   y={pillY + 0.5}
                   dominantBaseline="central"
                   textAnchor="start"
-                  fill="#f1f5f9"
                   fontSize={11}
                   fontWeight={600}
                 >
@@ -1235,9 +1467,8 @@ export function NebulaGraph({
           ) : (
             <span>
               {visibleNodes.length} {visibleNodes.length === 1 ? 'item' : 'items'} ·{' '}
-              {activeStorylineCount} active{' '}
-              {activeStorylineCount === 1 ? 'storyline' : 'storylines'} · Click a storyline hub or
-              post to inspect
+              {clusterCount} {clusterCount === 1 ? 'narrative cluster' : 'narrative clusters'}
+              {emergingStorylineCount > 0 ? ` · ${emergingStorylineCount} emerging` : ''}
             </span>
           )}
         </div>
@@ -1254,7 +1485,7 @@ export function NebulaGraph({
         <div className="vf-graph-tooltip" role="status">
           <div className="vf-tooltip-title">{hoveredHub.name}</div>
           <div className="vf-tooltip-meta">
-            <span>Storyline hub</span>
+            <span>Narrative cluster</span>
             <span>·</span>
             <span>
               {hoveredHub.count} {hoveredHub.count === 1 ? 'item' : 'items'}

@@ -361,9 +361,22 @@ body,
   pointer-events: none;
 }
 
-.vf-hub-pill-group {
+.vf-hub-pill {
   pointer-events: auto;
   cursor: pointer;
+}
+
+.vf-hub-pill-bg {
+  fill: rgba(11, 17, 32, 0.88);
+}
+
+.vf-hub-pill-text {
+  fill: #e2e8f0;
+}
+
+.vf-hub-pill.is-focused .vf-hub-pill-text,
+.vf-hub-pill:hover .vf-hub-pill-text {
+  fill: #ffffff;
 }
 
 .vf-graph-context-pill {
