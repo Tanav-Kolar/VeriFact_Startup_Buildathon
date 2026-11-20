@@ -82,7 +82,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    cors_origins: str = "http://localhost:5173"
+    cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     graph_backend: str = "frames"
     spanner_live: bool = False
     live_ingestion: bool = False

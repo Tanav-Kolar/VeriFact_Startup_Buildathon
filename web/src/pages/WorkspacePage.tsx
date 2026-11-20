@@ -683,6 +683,7 @@ export function WorkspacePage() {
           focusedStorylineId={focusedStorylineId}
           selectedNodeId={selectedNodeId}
           onSelectNode={handleSelectNode}
+          onFocusStoryline={handleToggleFocus}
           onJumpToHour={(targetHour) => {
             setIsPlaying(false)
             setHour(targetHour)

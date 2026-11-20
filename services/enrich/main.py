@@ -927,6 +927,7 @@ def _process_text_groups(
             config, settings, bq_client=bq_client, runner=runner, now_iso=now_iso, write_enabled=write_enabled
         )
         idx = 0
+        stance_rate_limited = False
         while idx < len(text_groups):
             remaining = cap_tracker.remaining()
             if remaining <= 0:
@@ -939,17 +940,23 @@ def _process_text_groups(
             for group_items, emb, assignment in embedded:
                 run_outputs: list[dict[str, Any]] = []
                 run_a_lang: str | None = None
-                if not assignment.off_topic:
+                if not assignment.off_topic and not stance_rate_limited:
                     prompts = (
                         render_prompt(templates[0], config.claims_to_check, group_items[0].text),
                         render_prompt(templates[1], config.claims_to_check, group_items[0].text),
                         render_prompt(templates[2], config.claims_to_check, group_items[0].text),
                     )
-                    run_outputs = runner.run_stance_paraphrases(prompts)
-                    run_a_lang = run_outputs[0].get("lang") if run_outputs and isinstance(run_outputs[0], dict) else None
+                    try:
+                        run_outputs = runner.run_stance_paraphrases(prompts)
+                        run_a_lang = run_outputs[0].get("lang") if run_outputs and isinstance(run_outputs[0], dict) else None
+                    except Exception as exc:  # noqa: BLE001
+                        if not _is_retryable_error(exc):
+                            raise
+                        stance_rate_limited = True
+                        _log_json("enrich_stance_rate_limited_continuing_embeddings", error=str(exc))
 
                 for item in group_items:
-                    claims = [] if assignment.off_topic else verify_and_aggregate_claims(item.text, run_outputs, valid_claim_ids)
+                    claims = [] if (assignment.off_topic or not run_outputs) else verify_and_aggregate_claims(item.text, run_outputs, valid_claim_ids)
                     rows.append(_build_enrichment_row(
                         item, config, settings, official_x_authors, now_iso,
                         lang=resolve_language(item.lang, run_a_lang),
