@@ -1,0 +1,57 @@
+{
+  "synthetic": true,
+  "response": {
+    "data": [
+      {
+        "id": "1000000000000000201",
+        "text": "Interesting benchmark numbers on Widget Hub, curious how hosting works.",
+        "author_id": "9000000010",
+        "created_at": "2026-11-16T14:05:00.000Z",
+        "lang": "en",
+        "conversation_id": "1000000000000000101",
+        "referenced_tweets": [
+          {
+            "type": "replied_to",
+            "id": "1000000000000000101"
+          }
+        ],
+        "public_metrics": {
+          "retweet_count": 1,
+          "reply_count": 0,
+          "like_count": 6,
+          "quote_count": 0,
+          "bookmark_count": 0,
+          "impression_count": 180
+        }
+      },
+      {
+        "id": "1000000000000000202",
+        "text": "Does Widget Hub use dedicated clusters or shared compute?",
+        "author_id": "9000000011",
+        "created_at": "2026-11-16T14:12:30.000Z",
+        "lang": "en",
+        "conversation_id": "1000000000000000101",
+        "referenced_tweets": [
+          {
+            "type": "replied_to",
+            "id": "1000000000000000101"
+          }
+        ],
+        "public_metrics": {
+          "retweet_count": 0,
+          "reply_count": 2,
+          "like_count": 9,
+          "quote_count": 0,
+          "bookmark_count": 1,
+          "impression_count": 210
+        }
+      }
+    ],
+    "meta": {
+      "newest_id": "1000000000000000202",
+      "oldest_id": "1000000000000000201",
+      "result_count": 2,
+      "next_token": "synth_thread_next_p2"
+    }
+  }
+}

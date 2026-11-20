@@ -1,0 +1,34 @@
+{
+  "synthetic": true,
+  "response": {
+    "data": [
+      {
+        "id": "1000000000000000301",
+        "text": "Quoting the Widget Hub launch: most listed models are third-party.",
+        "author_id": "9000000020",
+        "created_at": "2026-11-16T15:00:00.000Z",
+        "lang": "en",
+        "conversation_id": "1000000000000000301",
+        "referenced_tweets": [
+          {
+            "type": "quoted",
+            "id": "1000000000000000101"
+          }
+        ],
+        "public_metrics": {
+          "retweet_count": 5,
+          "reply_count": 2,
+          "like_count": 29,
+          "quote_count": 1,
+          "bookmark_count": 3,
+          "impression_count": 880
+        }
+      }
+    ],
+    "meta": {
+      "newest_id": "1000000000000000301",
+      "oldest_id": "1000000000000000301",
+      "result_count": 1
+    }
+  }
+}

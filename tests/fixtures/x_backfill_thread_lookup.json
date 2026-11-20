@@ -1,0 +1,56 @@
+{
+  "synthetic": true,
+  "response": {
+    "data": [
+      {
+        "id": "1000000000000000101",
+        "text": "Launching Widget Hub today with open benchmarks and low latency.",
+        "author_id": "9000000001",
+        "created_at": "2026-11-16T13:37:16.000Z",
+        "lang": "en",
+        "conversation_id": "1000000000000000101",
+        "entities": {
+          "urls": [
+            {
+              "start": 10,
+              "end": 33,
+              "url": "https://t.co/synth1",
+              "expanded_url": "https://acme.example.org/blog/widget-hub",
+              "display_url": "acme.example.org/blog/widget-hub"
+            }
+          ]
+        },
+        "public_metrics": {
+          "retweet_count": 20,
+          "reply_count": 8,
+          "like_count": 95,
+          "quote_count": 4,
+          "bookmark_count": 11,
+          "impression_count": 3200
+        }
+      },
+      {
+        "id": "1000000000000000102",
+        "text": "Full pricing and technical documentation for Widget Hub are live now.",
+        "author_id": "9000000001",
+        "created_at": "2026-11-16T13:38:05.000Z",
+        "lang": "en",
+        "conversation_id": "1000000000000000101",
+        "referenced_tweets": [
+          {
+            "type": "replied_to",
+            "id": "1000000000000000101"
+          }
+        ],
+        "public_metrics": {
+          "retweet_count": 7,
+          "reply_count": 3,
+          "like_count": 41,
+          "quote_count": 1,
+          "bookmark_count": 5,
+          "impression_count": 1400
+        }
+      }
+    ]
+  }
+}
