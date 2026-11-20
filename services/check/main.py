@@ -36,15 +36,15 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from starlette.datastructures import UploadFile
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from services.check.adk_pipeline import CheckPipeline
+from services.check.agents import PROMPT_VERSION
 from services.check.fetch import HttpFetcher, url_problem
-from services.check.gemini import PROMPT_VERSION, GeminiError, GeminiGateway
 from services.check.pipeline import (
     PERSON_NOTICE,
     CheckError,
     CheckInput,
     Fetcher,
-    Gateway,
-    analyse,
+    GeminiError,
     looks_like_person_assessment,
 )
 from verifact_core.config import EventConfig, load_event
@@ -75,10 +75,12 @@ class CheckSettings(BaseSettings):
     check_daily_call_cap: int = Field(gt=0)
     check_max_input_chars: int = Field(gt=0)
     check_max_image_bytes: int = Field(gt=0)
+    # Optional: without a key the fact-check lookup is skipped and the rest of the check still works.
+    fact_check_api_key: str | None = None
     # Not cost caps, so they have defaults. Hops: how many proxies append to X-Forwarded-For before
     # the request reaches the service (1 = Cloud Run directly; 2 = behind a load balancer).
     trusted_proxy_hops: int = Field(default=1, ge=1)
-    check_request_timeout_s: float = Field(default=45.0, gt=0)
+    check_request_timeout_s: float = Field(default=80.0, gt=0)  # a check runs five model stages in turn
 
     @property
     def cors_origins_list(self) -> list[str]:
@@ -343,7 +345,7 @@ def _public(report: dict) -> dict:
 def create_app(
     settings: CheckSettings | None = None,
     *,
-    gateway: Gateway | None = None,
+    pipeline: CheckPipeline | None = None,
     fetcher: Fetcher | None = None,
     store: FirestoreStore | MemoryStore | None = None,
     event: EventConfig | None = None,
@@ -353,10 +355,8 @@ def create_app(
     event = event or load_event(Path(settings.events_dir) / f"{settings.event_id}.yaml")
     _configure_logging(settings.log_level)
     clock = now or (lambda: datetime.now(timezone.utc))
-    gateway = gateway or GeminiGateway(
-        project=settings.gcp_project, region=settings.gcp_region, model=settings.gemini_model
-    )
     fetcher = fetcher or HttpFetcher()
+    pipeline = pipeline or CheckPipeline(settings=settings, fetcher=fetcher, event=event)
     store = store or _default_store(settings)
     limiter = RateLimiter(settings.check_rate_limit_per_min, salt=os.urandom(16))
     budget = DailyBudget(settings.check_daily_call_cap, now=clock)
@@ -423,9 +423,8 @@ def create_app(
 
         try:
             async with asyncio.timeout(settings.check_request_timeout_s):
-                analysis = await analyse(inp, gateway=gateway, fetcher=fetcher, event=event,
-                                         budget=budget, now=clock,
-                                         max_chars=settings.check_max_input_chars)
+                analysis = await pipeline.analyse(inp, budget=budget, now=clock,
+                                                  max_chars=settings.check_max_input_chars)
         except TimeoutError as exc:
             raise CheckError(504, "timeout", "The check took too long. Please try again.") from exc
         if analysis.notice:

@@ -1,37 +1,34 @@
-"""Check pipeline: input -> claim cards.
+"""Check pipeline: the deterministic parts.
 
-The model only proposes (claims, sources, stances). Everything a user sees is decided here:
-status and counts are computed from verified evidence (P1.3), evidence spans must be exact
-substrings of the fetched page (P1.2, P7.1), URLs come from grounding metadata and the HTTP
-response (P7.3), and self-reported / conflict labels come from the event config (P2, P3).
+The ADK agents (agents.py) only propose: claims, candidate pages, quotes, a written report. This
+module decides what a user sees. Status and counts are computed from verified evidence (P1.3), a
+quote counts only if it appears verbatim in the page it names (P1.2, P7.1), page URLs come from
+grounding metadata and the HTTP response (P7.3), and self-reported and conflict labels come from
+the event config (P2, P3). Nothing here orchestrates a model call.
 """
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
+import json
 import re
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import urlencode
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from services.check.fetch import FetchedPage, FetchError
+from services.check.fetch import FetchedPage
 from verifact_core.config import ClaimToCheck, EventConfig
 from verifact_core.url_safety import extract_host, url_hash
 
-MAX_CLAIMS = 2  # cost ceiling: at most 1 + 2 * MAX_CLAIMS model calls per check
-MAX_SOURCES = 5
 PAGE_TEXT_LIMIT = 20_000
 MAX_SPAN_CHARS = 600
-
 REPORT_EXCERPT_CHARS = 1500
 
-# The legacy report vocabulary, kept at the user's request (a deliberate deviation from P1.4 and
-# DECISIONS.md #6). Anything the model returns outside these sets is discarded.
+# The legacy report vocabulary, kept at the project owner's request (a deliberate deviation from
+# P1.4 and DECISIONS.md #6). Anything the model returns outside these sets is discarded.
 REPORT_TAGS = frozenset({"Misleading", "True", "False", "Partially True", "Unverified"})
 CREDIBILITY_CATEGORIES = frozenset({"Highly Credible", "Moderate", "Low Credibility", "Unreliable"})
 NO_CONCLUSION = "Unverified: there was not enough verifiable evidence to reach a conclusion."
@@ -48,7 +45,7 @@ Stance = Literal["supports", "contradicts", "neutral"]
 
 
 class GeminiError(RuntimeError):
-    """The model call failed or returned output we cannot use."""
+    """The model run failed or returned output we cannot use."""
 
 
 class CheckError(Exception):
@@ -71,17 +68,12 @@ class Extraction(BaseModel):
     claims: list[ExtractedClaim] = Field(default_factory=list)
 
 
-class GroundedSource(BaseModel):
+class ReaderEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
-    uri: str
-    title: str | None = None
-
-
-class StanceOut(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-    index: int
+    claim_index: int
+    url: str
     stance: Stance
-    span: str
+    quote: str
 
 
 class ReportConclusion(BaseModel):
@@ -105,19 +97,6 @@ class ReportOut(BaseModel):
     overall_summary: str = ""
     conclusions: list[ReportConclusion] = Field(default_factory=list)
     sources: list[ReportSource] = Field(default_factory=list)
-
-
-class Gateway(Protocol):
-    async def extract(
-        self, *, text: str | None, image: tuple[bytes, str] | None,
-        known_claims: list[tuple[str, str]],
-    ) -> Extraction: ...
-
-    async def ground(self, claim_text: str) -> list[GroundedSource]: ...
-
-    async def stances(self, claim_text: str, pages: list[str]) -> list[StanceOut]: ...
-
-    async def report(self, *, claims: list[dict], sources: list[dict]) -> ReportOut: ...
 
 
 class Fetcher(Protocol):
@@ -157,8 +136,8 @@ _PERSON_CUES = re.compile(
 def looks_like_person_assessment(text: str) -> bool:
     """True when the input asks about an account's character rather than a factual claim.
 
-    ponytail: a keyword heuristic that errs towards declining; the extraction call also flags
-    person-targeted input (``about_person``), so this only saves a model call on the obvious cases.
+    ponytail: a keyword heuristic that errs towards declining; the extractor agent also flags
+    person-targeted input (``about_person``), so this only saves a model run on the obvious cases.
     """
     return bool(_HANDLE.search(text) and _PERSON_CUES.search(text))
 
@@ -171,6 +150,43 @@ def evidence_status(supporting: int, contradicting: int) -> str:
     if contradicting:
         return "contradicted"
     return "unverified"
+
+
+def utc_iso(moment: datetime) -> str:
+    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def parse_json(value: Any) -> Any:
+    """Best-effort JSON from model text: plain, fenced in ``` or wrapped in prose. None if unusable."""
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\n?|\n?```$", "", text).strip()
+    try:
+        return json.loads(text)
+    except (ValueError, RecursionError):
+        pass
+    for opener, closer in (("[", "]"), ("{", "}")):
+        start, end = text.find(opener), text.rfind(closer)
+        if 0 <= start < end:
+            try:
+                return json.loads(text[start:end + 1])
+            except (ValueError, RecursionError):
+                continue
+    return None
+
+
+def parse_model(model: type[BaseModel], value: Any) -> Any:
+    data = parse_json(value)
+    if data is None:
+        return None
+    try:
+        return model.model_validate(data)
+    except ValidationError:
+        return None
 
 
 def _host_under(host: str, domains: set[str]) -> bool:
@@ -193,40 +209,90 @@ def classify_source(url: str, span: str, event: EventConfig) -> tuple[str, str, 
     return "news", ("investor_with_conflict" if conflict else "press"), conflict
 
 
-def _utc_iso(moment: datetime) -> str:
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+def chosen_claims(extraction: Extraction, event: EventConfig, text: str | None
+                  ) -> list[tuple[ExtractedClaim, ClaimToCheck | None]]:
+    """The claims worth checking, in order and without a cap.
 
-
-def _reserve(budget: Budget) -> None:
-    if not budget.try_reserve(1):
-        raise CheckError(
-            429, "daily_cap_reached", "Today's Check limit has been reached. Please try again tomorrow."
-        )
-
-
-def verified_evidence(
-    stances: list[StanceOut], pages: list[FetchedPage], texts: list[str], event: EventConfig,
-    fetched_at: str,
-) -> list[dict]:
-    """Keep one entry per page, and only when the quoted span appears verbatim in that page."""
-    kept: dict[int, dict] = {}
-    for s in stances:
-        if not (0 <= s.index < len(pages)) or s.index in kept:
+    A claim matched to a config claim must name an id the config has. Any other claim must be a
+    verbatim part of the input (P7.1); for an image there is no text to compare, so it passes.
+    """
+    known = {c.id: c for c in event.claims_to_check}
+    chosen: list[tuple[ExtractedClaim, ClaimToCheck | None]] = []
+    for claim in extraction.claims:
+        config_claim = known.get(claim.matched_claim_id or "")
+        if config_claim is None:
+            if not claim.text.strip() or (text is not None and claim.text not in text):
+                continue
+        if config_claim and any(c is config_claim for _, c in chosen):
             continue
-        if not s.span or len(s.span) > MAX_SPAN_CHARS or s.span not in texts[s.index]:
+        chosen.append((claim, config_claim))
+    return chosen
+
+
+def verified_evidence(entries: list[ReaderEntry], claim_count: int, pages: dict[str, dict],
+                      candidates: list[str], event: EventConfig, fetched_at: str) -> list[list[dict]]:
+    """Per claim, the evidence whose quote appears verbatim in the page it names, in page order."""
+    order = {url: i for i, url in enumerate(candidates)}
+    per_claim: list[dict[str, tuple[int, dict]]] = [{} for _ in range(claim_count)]
+    for e in entries:
+        page = pages.get(e.url)
+        if page is None or not (0 <= e.claim_index < claim_count) or e.url in per_claim[e.claim_index]:
             continue
-        platform, source_type, conflict = classify_source(pages[s.index].url, s.span, event)
-        kept[s.index] = {
-            "item_id": f"web:{url_hash(pages[s.index].url)}",
-            "url": pages[s.index].url,
+        if not e.quote or len(e.quote) > MAX_SPAN_CHARS or e.quote not in page["text"]:
+            continue
+        platform, source_type, conflict = classify_source(page["url"], e.quote, event)
+        per_claim[e.claim_index][e.url] = (order.get(e.url, len(order)), {
+            "item_id": f"web:{url_hash(page['url'])}",
+            "url": page["url"],
             "platform": platform,
             "source_type": source_type,
-            "stance": s.stance,
-            "span": s.span,
-            "created_at": fetched_at,  # our own collected_at; page publish time is not known
+            "stance": e.stance,
+            "span": e.quote,
+            "created_at": fetched_at,  # our own collected_at; a page's publish time is not known
             "conflict": conflict,
-        }
-    return [kept[i] for i in sorted(kept)]
+        })
+    return [[ev for _, ev in sorted(found.values(), key=lambda t: t[0])] for found in per_claim]
+
+
+@dataclass
+class Collected:
+    chosen: list[tuple[ExtractedClaim, ClaimToCheck | None]]
+    evidence: list[list[dict]]
+    sources: list[FetchedPage]
+
+
+def collect(state: dict, event: EventConfig, fetched_at: str) -> Collected | None:
+    """Everything the agents left in session state, verified. None if extraction is unusable."""
+    extraction = parse_model(Extraction, state.get("extracted"))
+    if extraction is None:
+        return None
+    chosen = chosen_claims(extraction, event, state.get("input_text"))
+    pages = state.get("pages") or {}
+    candidates = list(state.get("candidates") or [])
+    raw = parse_json(state.get("reader_output"))
+    entries = [e for e in (parse_model(ReaderEntry, x) for x in (raw if isinstance(raw, list) else [])) if e]
+    sources: list[FetchedPage] = []
+    for url in candidates:
+        page = pages.get(url)
+        if page and all(url_hash(page["url"]) != url_hash(s.url) for s in sources):
+            sources.append(FetchedPage(url=page["url"], text=page["text"]))
+    return Collected(chosen, verified_evidence(entries, len(chosen), pages, candidates, event, fetched_at),
+                     sources)
+
+
+def fact_checks_for(state: dict, claim_count: int) -> list[list[dict]]:
+    """Fact-check results per claim, straight from the API as the tool recorded them (P7.3)."""
+    raw = state.get("fact_checks") or {}
+    results: list[list[dict]] = []
+    for i in range(claim_count):
+        reviews = raw.get(str(i)) or []
+        results.append([
+            {"source": r["publisher"],
+             "summary": f'Rated "{r["rating"]}": {r["title"]}' if r.get("rating") else r.get("title", ""),
+             "url": r["url"]}
+            for r in reviews if r.get("url")
+        ])
+    return results
 
 
 def build_card(claim_id: str, text: str, evidence: list[dict], config_claim: ClaimToCheck | None,
@@ -263,10 +329,21 @@ def build_card(claim_id: str, text: str, evidence: list[dict], config_claim: Cla
     }
 
 
+def cards_for(collected: Collected, event: EventConfig) -> list[dict]:
+    cards = []
+    for (claim, config_claim), evidence in zip(collected.chosen, collected.evidence, strict=True):
+        text = config_claim.text if config_claim else claim.text
+        claim_id = config_claim.id if config_claim else "chk-" + hashlib.sha1(text.encode()).hexdigest()[:12]
+        cards.append(build_card(claim_id, text, evidence, config_claim, event))
+    return cards
+
+
 def build_report(cards: list[dict], pages: list[FetchedPage], out: ReportOut | None,
-                 fallback_summary: str = NO_SUMMARY) -> dict:
-    """The legacy-shaped report. Evidence lists are the span-verified evidence, source URLs are the
-    pages we fetched, and every model-written field is validated or replaced."""
+                 fallback_summary: str = NO_SUMMARY,
+                 fact_checks: list[list[dict]] | None = None) -> dict:
+    """The legacy-shaped report. Evidence lists are the quote-verified evidence, source URLs are the
+    pages we fetched, fact-checks come from the API, and every model-written field is validated or
+    replaced."""
     out = out or ReportOut()
     conclusions = {
         c.index: c.conclusion.strip()
@@ -280,7 +357,7 @@ def build_report(cards: list[dict], pages: list[FetchedPage], out: ReportOut | N
                                     for e in card["evidence"] if e["stance"] == "supports"],
             "opposing_evidence": [{"summary": e["span"], "source": e["url"]}
                                   for e in card["evidence"] if e["stance"] == "contradicts"],
-            "fact_checking_results": [],  # the fact-check database lookup is out of scope (PRD)
+            "fact_checking_results": (fact_checks[i] if fact_checks and i < len(fact_checks) else []),
             "conclusion": conclusions.get(i, NO_CONCLUSION),
         }
         for i, card in enumerate(cards)
@@ -302,103 +379,3 @@ def build_report(cards: list[dict], pages: list[FetchedPage], out: ReportOut | N
         "analyzed_claims": analysed,
         "source_credibility_summary": [kept[i] for i in sorted(kept)],
     }
-
-
-# ------------------------------------------------------------------- orchestration
-
-
-async def _card_for(
-    claim: ExtractedClaim, config_claim: ClaimToCheck | None, *, gateway: Gateway, fetcher: Fetcher,
-    event: EventConfig, budget: Budget, fetched_at: str,
-) -> tuple[dict, list[FetchedPage]]:
-    text = config_claim.text if config_claim else claim.text
-    claim_id = config_claim.id if config_claim else "chk-" + hashlib.sha1(text.encode()).hexdigest()[:12]
-
-    _reserve(budget)
-    sources = list({s.uri: s for s in await gateway.ground(text)}.values())[:MAX_SOURCES]
-    fetched = await asyncio.gather(*(fetcher.fetch(s.uri) for s in sources), return_exceptions=True)
-    pages: list[FetchedPage] = []
-    for result in fetched:
-        if isinstance(result, Exception):
-            continue  # one unreadable source must not sink the whole check
-        if isinstance(result, BaseException):
-            raise result  # cancellation still propagates
-        if all(url_hash(result.url) != url_hash(p.url) for p in pages):
-            pages.append(result)
-
-    evidence: list[dict] = []
-    if pages:
-        texts = [p.text[:PAGE_TEXT_LIMIT] for p in pages]
-        _reserve(budget)
-        evidence = verified_evidence(await gateway.stances(text, texts), pages, texts, event, fetched_at)
-    return build_card(claim_id, text, evidence, config_claim, event), pages
-
-
-async def analyse(
-    inp: CheckInput, *, gateway: Gateway, fetcher: Fetcher, event: EventConfig, budget: Budget,
-    now: Callable[[], datetime], max_chars: int,
-) -> Analysis:
-    text = inp.text
-    if inp.kind == "url":
-        try:
-            text = (await fetcher.fetch(inp.url or "")).text[:max_chars]
-        except FetchError as exc:
-            raise CheckError(422, "unreadable_url", "That page could not be read.") from exc
-        if not text.strip():
-            raise CheckError(422, "unreadable_url", "That page has no readable text.")
-
-    known = {c.id: c for c in event.claims_to_check}
-    _reserve(budget)
-    extraction = await gateway.extract(
-        text=text, image=inp.image, known_claims=[(c.id, c.text) for c in event.claims_to_check]
-    )
-    if extraction.about_person:
-        return Analysis(notice=PERSON_NOTICE)
-
-    chosen: list[tuple[ExtractedClaim, ClaimToCheck | None]] = []
-    for claim in extraction.claims[:MAX_CLAIMS]:
-        config_claim = known.get(claim.matched_claim_id or "")
-        if config_claim is None:
-            if not claim.text.strip() or (text is not None and claim.text not in text):
-                continue  # P7.1: a restated claim must be a verbatim part of the input
-        if config_claim and any(c is config_claim for _, c in chosen):
-            continue
-        chosen.append((claim, config_claim))
-
-    fetched_at = _utc_iso(now())
-    results = await asyncio.gather(*(
-        _card_for(c, cfg, gateway=gateway, fetcher=fetcher, event=event, budget=budget,
-                  fetched_at=fetched_at)
-        for c, cfg in chosen
-    ))
-    cards = [card for card, _ in results]
-    pages: list[FetchedPage] = []
-    for _, claim_pages in results:
-        for page in claim_pages:
-            if all(url_hash(page.url) != url_hash(p.url) for p in pages):
-                pages.append(page)
-    report = await _report_for(cards, pages, gateway=gateway, budget=budget)
-    return Analysis(cards=cards, matched=any(cfg for _, cfg in chosen), report=report)
-
-
-async def _report_for(cards: list[dict], pages: list[FetchedPage], *, gateway: Gateway,
-                      budget: Budget) -> dict:
-    if not cards:
-        return build_report([], [], None, NO_CLAIMS_SUMMARY)
-    if not pages:
-        return build_report(cards, [], None, NO_SOURCES_SUMMARY)
-    if not budget.try_reserve(1):  # the cards are already paid for; skip only the written summary
-        return build_report(cards, pages, None)
-    claims = [
-        {
-            "text": card["text"],
-            "supporting": [e["span"] for e in card["evidence"] if e["stance"] == "supports"],
-            "opposing": [e["span"] for e in card["evidence"] if e["stance"] == "contradicts"],
-        }
-        for card in cards
-    ]
-    sources = [{"url": p.url, "excerpt": p.text[:REPORT_EXCERPT_CHARS]} for p in pages]
-    try:
-        return build_report(cards, pages, await gateway.report(claims=claims, sources=sources))
-    except GeminiError:  # a failed summary must not discard the claim cards
-        return build_report(cards, pages, None)

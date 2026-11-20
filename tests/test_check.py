@@ -18,15 +18,17 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from services.check.fetch import FetchedPage, FetchError, HttpFetcher, html_to_text
-from services.check.gemini import SYSTEM_EXTRACT, GeminiError, GeminiGateway, wrap_untrusted
+from google.adk.models import BaseLlm, LlmResponse
+from google.genai import types
+
+from services.check.adk_pipeline import CheckPipeline
+from services.check.agents import SYSTEM_EXTRACT, wrap_untrusted
+from verifact_core.config import load_event
 from services.check.main import CheckSettings, DailyBudget, MemoryStore, RateLimiter, create_app
 from services.check.pipeline import (
     NO_CONCLUSION,
     PERSON_NOTICE,
-    Extraction,
-    GroundedSource,
-    ReportOut,
-    StanceOut,
+    GeminiError,
     evidence_status,
     looks_like_person_assessment,
 )
@@ -45,6 +47,7 @@ CARD_KEYS = {
 EVIDENCE_KEYS = {
     "item_id", "url", "platform", "source_type", "stance", "span", "created_at", "conflict",
 }
+FAKE_API_KEY = "synthetic-not-a-real-key"  # a placeholder, never a real credential
 PNG = b"\x89PNG\r\n\x1a\n" + b"0" * 20
 ORIGIN = "http://127.0.0.1:5173"
 
@@ -52,37 +55,73 @@ ORIGIN = "http://127.0.0.1:5173"
 # --------------------------------------------------------------------------- fakes
 
 
-class FakeGateway:
-    def __init__(self, scenario: dict, *, error: Exception | None = None) -> None:
-        self.scenario = scenario
-        self.error = error
-        self.calls = {"extract": 0, "ground": 0, "stances": 0, "report": 0}
-        self.report_error: Exception | None = None
-        self.last_extract_text: str | None = None
-        self.last_extract_image: tuple[bytes, str] | None = None
+ROLES = {"claims_extractor": "extract", "web_search": "ground", "fact_checker": "fact_check",
+         "evidence_reader": "stances", "report_generator": "report"}
 
-    async def extract(self, *, text, image, known_claims) -> Extraction:
-        self.calls["extract"] += 1
-        self.last_extract_text, self.last_extract_image = text, image
-        if self.error:
+
+class FakeLlm(BaseLlm):
+    """A scripted model for the ADK agents. Each agent's instruction starts with [agent:<name>]."""
+
+    model: str = "gemini-fake"  # the google_search tool only accepts Gemini model names
+    scenario: dict = {}
+    error: object = None
+    delay: float = 0.0
+    calls: dict = {"extract": 0, "ground": 0, "stances": 0, "report": 0, "fact_check": 0}
+    instructions: dict = {}
+    inputs: dict = {}
+    last_extract_text: str | None = None
+    last_extract_image: tuple | None = None
+
+    async def generate_content_async(self, llm_request, stream=False):
+        system = str(llm_request.config.system_instruction or "")
+        role = next(r for r in ROLES if f"[agent:{r}]" in system)
+        self.instructions[role] = system
+        self.inputs[role] = "\n".join(
+            p.text or "" for c in llm_request.contents[:1] for p in (c.parts or []))
+        self.calls[ROLES[role]] += 1
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.error is not None and role == "claims_extractor":
             raise self.error
-        return Extraction.model_validate(self.scenario["extraction"])
-
-    async def ground(self, claim_text: str) -> list[GroundedSource]:
-        self.calls["ground"] += 1
-        return [GroundedSource(uri=u) for u in self.scenario["grounded_uris"]]
-
-    async def stances(self, claim_text: str, pages: list[str]) -> list[StanceOut]:
-        self.calls["stances"] += 1
-        return [StanceOut.model_validate(s) for s in self.scenario["stances"]]
-
-    async def report(self, *, claims, sources) -> ReportOut:
-        self.calls["report"] += 1
-        self.last_report_input = (claims, sources)
-        if self.report_error:
-            raise self.report_error
-        return ReportOut.model_validate(self.scenario.get("report") or {
-            "tag": "Unverified", "overall_summary": "synthetic summary"})
+        followup = any(p.function_response for c in llm_request.contents for p in (c.parts or []))
+        sc = self.scenario
+        uris = sc.get("grounded_uris", [])
+        parts, grounding = [], None
+        if role == "claims_extractor":
+            self.last_extract_text, self.last_extract_image = None, None
+            for part in llm_request.contents[-1].parts or []:
+                match = re.search(r"<untrusted>\n(.*)\n</untrusted>", part.text or "", re.S)
+                if match:
+                    self.last_extract_text = match.group(1)
+                if part.inline_data:
+                    self.last_extract_image = (part.inline_data.data, part.inline_data.mime_type)
+            parts = [types.Part(text=json.dumps(sc["extraction"]))]
+        elif role == "web_search":
+            parts = [types.Part(text="Searched.")]
+            if uris:
+                grounding = types.GroundingMetadata(grounding_chunks=[
+                    types.GroundingChunk(web=types.GroundingChunkWeb(uri=u, title="t")) for u in uris])
+        elif role == "fact_checker":
+            asks = sc.get("fact_checks", [])
+            if asks and not followup:
+                parts = [types.Part(function_call=types.FunctionCall(name="fact_check_claim", args=a))
+                         for a in asks]
+            else:
+                parts = [types.Part(text="Done.")]
+        elif role == "evidence_reader":
+            entries = [{"claim_index": e.get("claim_index", 0), "url": e.get("url", uris[e["index"]] if "index" in e else ""),
+                        "stance": e["stance"], "quote": e["span"]} for e in sc.get("stances", [])]
+            urls = list(dict.fromkeys(e["url"] for e in entries if e["url"]))
+            if urls and not followup:
+                parts = [types.Part(function_call=types.FunctionCall(name="read_page", args={"url": u}))
+                         for u in urls]
+            else:
+                parts = [types.Part(text=json.dumps(entries))]
+        else:
+            text = sc["report_raw"] if "report_raw" in sc else json.dumps(
+                sc.get("report") or {"tag": "Unverified", "overall_summary": "synthetic summary"})
+            parts = [types.Part(text=text)]
+        yield LlmResponse(content=types.Content(role="model", parts=parts), grounding_metadata=grounding)
 
 
 class FakeFetcher:
@@ -117,12 +156,23 @@ def make_settings(events_dir: Path, **over) -> CheckSettings:
     return CheckSettings(_env_file=None, **values)
 
 
+def build_client(events_dir: Path, scenario, *, fetcher=None, store=None, error=None, delay=0.0,
+                 fact_check_transport=None, **over):
+    settings = make_settings(events_dir, **over)
+    event = load_event(events_dir / "test-event.yaml")
+    llm = FakeLlm(scenario=scenario, error=error, delay=delay,
+                  calls={"extract": 0, "ground": 0, "stances": 0, "report": 0, "fact_check": 0}, instructions={},
+                  inputs={})
+    fetcher = fetcher or FakeFetcher(PAGES)
+    store = store or MemoryStore()
+    pipeline = CheckPipeline(settings=settings, fetcher=fetcher, event=event, llm=llm,
+                             fact_check_transport=fact_check_transport)
+    app = create_app(settings, pipeline=pipeline, fetcher=fetcher, store=store, event=event)
+    return TestClient(app), llm, fetcher, store
+
+
 def make_client(events_dir: Path, scenario: str = "official_only_contradicts", **over):
-    gateway = FakeGateway(SCENARIOS[scenario], error=over.pop("error", None))
-    fetcher = FakeFetcher(PAGES)
-    store = MemoryStore()
-    app = create_app(make_settings(events_dir, **over), gateway=gateway, fetcher=fetcher, store=store)
-    return TestClient(app), gateway, fetcher, store
+    return build_client(events_dir, SCENARIOS[scenario], **over)
 
 
 # ---------------------------------------------------------------------- settings
@@ -154,7 +204,7 @@ def test_settings_read_limits_from_env(monkeypatch):
 
 def test_unknown_event_fails_at_startup(tmp_path):
     with pytest.raises(FileNotFoundError):
-        create_app(make_settings(tmp_path), gateway=FakeGateway({}), fetcher=FakeFetcher({}),
+        create_app(make_settings(tmp_path), pipeline=object(), fetcher=FakeFetcher({}),
                    store=MemoryStore())
 
 
@@ -376,16 +426,36 @@ def test_rate_limit_is_per_client(events_dir):
     assert other.status_code == 200
 
 
-def test_daily_cap_blocks_new_model_calls(events_dir):
+def test_daily_cap_counts_every_model_call(events_dir):
     scenario = SCENARIOS["official_only_contradicts"]
-    client, gateway, *_ = make_client(events_dir, check_daily_call_cap=3)
-    ok = client.post("/check", json={"text": scenario["input_text"]})
-    assert ok.status_code == 200 and sum(gateway.calls.values()) == 3
-    cached = client.post("/check", json={"text": scenario["input_text"]})
-    assert cached.status_code == 200  # cache hit spends nothing
+    probe, llm, *_ = make_client(events_dir)
+    assert probe.post("/check", json={"text": scenario["input_text"]}).status_code == 200
+    one_run = sum(llm.calls.values())
+    assert one_run >= 5  # extractor, search, reader (two turns), report: each is a counted call
+
+    client, llm, *_ = make_client(events_dir, check_daily_call_cap=one_run)
+    assert client.post("/check", json={"text": scenario["input_text"]}).status_code == 200
+    assert client.post("/check", json={"text": scenario["input_text"]}).status_code == 200  # cached
     capped = client.post("/check", json={"text": "a different claim"})
     assert capped.status_code == 429 and capped.json()["error"]["code"] == "daily_cap_reached"
-    assert gateway.calls["extract"] == 1
+    assert sum(llm.calls.values()) == one_run  # the refused check spent nothing
+
+
+def test_cap_reached_before_any_evidence_is_refused(events_dir):
+    text = SCENARIOS["official_only_contradicts"]["input_text"]
+    client, llm, *_ = make_client(events_dir, check_daily_call_cap=2)  # the extractor, then the search
+    resp = client.post("/check", json={"text": text})
+    assert resp.status_code == 429 and resp.json()["error"]["code"] == "daily_cap_reached"
+
+
+def test_cap_reached_at_the_report_step_keeps_the_claim_cards(events_dir):
+    text = SCENARIOS["official_only_contradicts"]["input_text"]
+    probe, llm, *_ = make_client(events_dir)
+    probe.post("/check", json={"text": text})
+    client, llm, *_ = make_client(events_dir, check_daily_call_cap=sum(llm.calls.values()) - 1)
+    body = client.post("/check", json={"text": text}).json()
+    assert body["claims"][0]["status"] == "contradicted" and len(body["claims"][0]["evidence"]) == 1
+    assert body["report"]["tag"] == "Unverified" and body["report"]["source_credibility_summary"] == []
 
 
 def test_content_hash_cache(events_dir):
@@ -534,16 +604,15 @@ def _chunks(total: int, size: int = 1024):
         yield b"a" * n
 
 
-def _app(events_dir: Path, *, gateway=None, store=None, **over) -> TestClient:
-    gateway = gateway or FakeGateway(SCENARIOS["official_only_contradicts"])
-    return TestClient(create_app(make_settings(events_dir, **over), gateway=gateway,
-                                 fetcher=FakeFetcher(PAGES), store=store or MemoryStore()))
+def _app(events_dir: Path, *, store=None, **over) -> TestClient:
+    return build_client(events_dir, SCENARIOS["official_only_contradicts"], store=store, **over)[0]
 
 
-class SlowGateway(FakeGateway):
-    async def extract(self, **kwargs):
-        await asyncio.sleep(5)
-        return await super().extract(**kwargs)
+class BoomPipeline:
+    """A pipeline that fails in a way the service did not plan for."""
+
+    async def analyse(self, *args, **kwargs):
+        raise RuntimeError("boom")
 
 
 class BrokenStore(MemoryStore):
@@ -556,6 +625,11 @@ class FlakyFetcher(FakeFetcher):
         if url.endswith("story-one"):
             raise ValueError("unexpected failure in one source")
         return await super().fetch(url)
+
+
+OFFICIAL = "https://official.example.test/blog/launch"
+STORY_ONE = "https://news.example.test/story-one"
+STORY_TWO = "https://news.example.test/story-two"
 
 
 # 1. SSRF: connect to the address that was validated (no second DNS lookup)
@@ -617,16 +691,16 @@ def test_one_failing_source_does_not_fail_the_check(events_dir):
         "stances": [
             {"index": 0, "stance": "contradicts",
              "span": "The Widget Factory hardware is privately funded by the company"},
-            {"index": 1, "stance": "contradicts",
+            {"index": 1, "stance": "supports", "span": "financed with a government grant"},
+            {"index": 2, "stance": "contradicts",
              "span": "the hardware was bought with the company's own money"},
         ],
     }
-    app = create_app(make_settings(events_dir), gateway=FakeGateway(scenario),
-                     fetcher=FlakyFetcher(PAGES), store=MemoryStore())
-    resp = TestClient(app).post("/check", json={"text": "The Widget Factory runs on subsidised hardware."})
+    client = build_client(events_dir, scenario, fetcher=FlakyFetcher(PAGES))[0]
+    resp = client.post("/check", json={"text": "The Widget Factory runs on subsidised hardware."})
     assert resp.status_code == 200
     urls = [e["url"] for e in resp.json()["claims"][0]["evidence"]]
-    assert urls == ["https://official.example.test/blog/launch", "https://news.example.test/story-two"]
+    assert urls == [OFFICIAL, STORY_TWO]  # story one failed to load, so its quote is dropped
 
 
 # 2. request bodies are bounded while streaming, not by a header
@@ -654,8 +728,10 @@ def test_deeply_nested_json_is_422_not_500(events_dir):
 
 
 def test_unexpected_error_is_a_json_500_the_browser_can_read(events_dir):
-    client, *_ = make_client(events_dir, error=RuntimeError("boom"))
-    resp = client.post("/check", json={"text": "anything factual"}, headers={"Origin": ORIGIN})
+    settings = make_settings(events_dir)
+    app = create_app(settings, pipeline=BoomPipeline(), fetcher=FakeFetcher(PAGES), store=MemoryStore(),
+                     event=load_event(events_dir / "test-event.yaml"))
+    resp = TestClient(app).post("/check", json={"text": "anything factual"}, headers={"Origin": ORIGIN})
     assert resp.status_code == 500 and resp.json()["error"]["code"] == "internal_error"
     assert resp.headers["access-control-allow-origin"] == ORIGIN and "boom" not in resp.text
 
@@ -665,25 +741,11 @@ def test_report_lookup_failure_is_503(events_dir):
     assert resp.status_code == 503 and resp.json()["error"]["code"] == "store_unavailable"
 
 
-def test_gateway_maps_transport_errors_to_gemini_error():
-    class Boom:
-        class aio:
-            class models:
-                @staticmethod
-                async def generate_content(**kwargs):
-                    raise ConnectionError("network down")
-
-    gateway = GeminiGateway(project="p", region="r", model="m", client=Boom())
-    with pytest.raises(GeminiError):
-        asyncio.run(gateway.ground("a claim"))
-
-
 # 5. a deadline on the whole request and on each fetch
 
 
 def test_request_deadline_returns_504(events_dir):
-    client = _app(events_dir, gateway=SlowGateway(SCENARIOS["official_only_contradicts"]),
-                  check_request_timeout_s=0.05)
+    client = _app(events_dir, delay=5.0, check_request_timeout_s=0.05)
     resp = client.post("/check", json={"text": "anything factual"})
     assert resp.status_code == 504 and resp.json()["error"]["code"] == "timeout"
 
@@ -805,11 +867,6 @@ def test_extension_address_helpers():
 REPORT_KEYS = {"tag", "overall_summary", "analyzed_claims", "source_credibility_summary"}
 ANALYSED_KEYS = {"claim_text", "supporting_evidence", "opposing_evidence", "fact_checking_results",
                  "conclusion"}
-OFFICIAL = "https://official.example.test/blog/launch"
-STORY_ONE = "https://news.example.test/story-one"
-STORY_TWO = "https://news.example.test/story-two"
-
-
 def _report(events_dir, scenario):
     client, gateway, *_ = make_client(events_dir, scenario)
     body = client.post("/check", json={"text": SCENARIOS[scenario]["input_text"]}).json()
@@ -852,12 +909,9 @@ def test_report_discards_invalid_model_output(events_dir):
 
 
 def test_report_step_failure_keeps_the_claim_cards(events_dir):
-    scenario = SCENARIOS["mixed_with_conflict"]
-    gateway = FakeGateway(scenario)
-    gateway.report_error = GeminiError("report model unavailable")
-    app = create_app(make_settings(events_dir), gateway=gateway, fetcher=FakeFetcher(PAGES),
-                     store=MemoryStore())
-    body = TestClient(app).post("/check", json={"text": scenario["input_text"]}).json()
+    scenario = dict(SCENARIOS["mixed_with_conflict"], report_raw="this is not json at all")
+    client = build_client(events_dir, scenario)[0]
+    body = client.post("/check", json={"text": scenario["input_text"]}).json()
     assert body["claims"][0]["status"] == "mixed" and len(body["claims"][0]["evidence"]) == 3
     assert body["report"]["tag"] == "Unverified" and body["report"]["source_credibility_summary"] == []
 
@@ -865,52 +919,82 @@ def test_report_step_failure_keeps_the_claim_cards(events_dir):
 def test_no_claims_gives_a_neutral_report_without_a_model_call(events_dir):
     body, gateway = _report(events_dir, "claim_text_not_in_input")
     assert body["claims"] == [] and body["report"]["analyzed_claims"] == []
-    assert body["report"]["tag"] == "Unverified" and gateway.calls["report"] == 0
+    assert body["report"]["tag"] == "Unverified" and gateway.calls["report"] == 0 and gateway.calls["ground"] == 0
 
 
 def test_report_model_sees_only_verified_evidence(events_dir):
     _, gateway = _report(events_dir, "mixed_with_conflict")
-    claims, sources = gateway.last_report_input
-    assert [c["supporting"] for c in claims] == [[
-        "Pat Investor said the hardware purchase was financed with a government grant"]]
-    assert [s["url"] for s in sources] == [OFFICIAL, STORY_ONE, STORY_TWO]
+    given = gateway.inputs["report_generator"]  # the model's input, never its system instruction
+    assert "Pat Investor said the hardware purchase was financed with a government grant" in given
+    assert STORY_ONE in given and OFFICIAL in given and STORY_TWO in given
+    assert "Pat Investor" not in gateway.instructions["report_generator"]
 
 
-@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
-def test_crop_rect_scales_a_css_pixel_rectangle_onto_the_device_pixel_capture():
-    viewport = {"width": 1000, "height": 800}
-    area = {"x": 10, "y": 20, "width": 100, "height": 50}
-    cases = [
-        # 1x screen: nothing to scale
-        [area, viewport, {"width": 1000, "height": 800}],
-        # 2x Retina: the legacy crop used CSS pixels here and cut the wrong region
-        [area, viewport, {"width": 2000, "height": 1600}],
-        # 3x
-        [{"x": 11, "y": 21, "width": 101, "height": 51}, viewport, {"width": 3000, "height": 2400}],
-        # drawn past the edge: clamped to the capture
-        [{"x": 950, "y": 780, "width": 200, "height": 100}, viewport, {"width": 2000, "height": 1600}],
-        # empty or inverted rectangles are refused
-        [{"x": 5, "y": 5, "width": 0, "height": 10}, viewport, {"width": 1000, "height": 800}],
-        [{"x": 5, "y": 5, "width": -4, "height": 10}, viewport, {"width": 1000, "height": 800}],
+
+
+# --------------------------------------------- ADK pipeline: uncapped claims and fact checks
+
+
+def test_claim_extraction_is_not_capped(events_dir):
+    scenario = SCENARIOS["many_claims"]
+    client, llm, *_ = make_client(events_dir, "many_claims")
+    body = client.post("/check", json={"text": scenario["input_text"]}).json()
+    assert [c["text"] for c in body["claims"]] == [
+        "Alpha holds", "Beta holds", "Gamma holds", "Delta holds", "Epsilon holds"]
+    assert len(body["report"]["analyzed_claims"]) == 5
+
+
+def _fact_transport(seen: list, status: int = 200):
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(status, json=DATA["fact_check_api_response"] if status == 200 else {})
+
+    return httpx.MockTransport(handler)
+
+
+def test_fact_check_results_come_from_the_api_not_the_model(events_dir):
+    seen: list = []
+    client, *_ = make_client(events_dir, "with_fact_check", fact_check_api_key=FAKE_API_KEY,
+                             fact_check_transport=_fact_transport(seen))
+    body = client.post("/check", json={"text": SCENARIOS["with_fact_check"]["input_text"]}).json()
+    assert body["report"]["analyzed_claims"][0]["fact_checking_results"] == [
+        {"source": "Example Checkers", "summary": 'Rated "Mostly accurate": Synthetic review title',
+         "url": "https://checkers.example.test/review-1"},
+        {"source": "Other Desk", "summary": 'Rated "Lacks context": Second synthetic review',
+         "url": "https://desk.example.test/review-2"},
     ]
-    script = (f"const {{cropRect}} = require({json.dumps(str(EXTENSION / 'crop.js'))});"
-              f"console.log(JSON.stringify({json.dumps(cases)}.map(c => cropRect(...c))))")
-    out = json.loads(subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True).stdout)
-    assert out == [
-        {"sx": 10, "sy": 20, "sw": 100, "sh": 50},
-        {"sx": 20, "sy": 40, "sw": 200, "sh": 100},
-        {"sx": 33, "sy": 63, "sw": 303, "sh": 153},
-        {"sx": 1900, "sy": 1560, "sw": 100, "sh": 40},
-        None,
-        None,
-    ]
+    request = seen[0]
+    assert request.url.host == "factchecktools.googleapis.com"
+    assert request.url.params["query"] == "The Widget Factory runs on subsidised hardware"
+    assert request.headers["x-goog-api-key"] == FAKE_API_KEY and FAKE_API_KEY not in str(request.url)
 
 
-def test_extension_has_the_legacy_snip_flow_pieces():
-    background = (EXTENSION / "background.js").read_text()
-    for token in ("captureVisibleTab", "OffscreenCanvas", "createImageBitmap", "cropRect",
-                  'contexts: ["page", "selection", "image", "video"]'):
-        assert token in background, token
-    snip = (EXTENSION / "snip.js").read_text()
-    assert "crosshair" in snip and "innerWidth" in snip and "Escape" in snip
-    assert (EXTENSION / "icons" / "loading-icon.png").exists()
+def test_fact_check_is_optional_without_a_key(events_dir):
+    seen: list = []
+    client, llm, *_ = make_client(events_dir, "with_fact_check", fact_check_transport=_fact_transport(seen))
+    body = client.post("/check", json={"text": SCENARIOS["with_fact_check"]["input_text"]}).json()
+    assert body["report"]["analyzed_claims"][0]["fact_checking_results"] == [] and seen == []
+    assert body["claims"][0]["status"] == "contradicted"  # the rest of the check still works
+    assert llm.calls["fact_check"] == 0  # and the idle agent made no model call at all
+
+
+def test_fact_check_api_failure_is_ignored(events_dir):
+    seen: list = []
+    client, *_ = make_client(events_dir, "with_fact_check", fact_check_api_key=FAKE_API_KEY,
+                             fact_check_transport=_fact_transport(seen, status=500))
+    resp = client.post("/check", json={"text": SCENARIOS["with_fact_check"]["input_text"]})
+    assert resp.status_code == 200 and seen
+    assert resp.json()["report"]["analyzed_claims"][0]["fact_checking_results"] == []
+
+
+def test_the_reader_can_only_open_pages_the_search_found(events_dir):
+    scenario = dict(SCENARIOS["official_only_contradicts"], stances=[
+        {"url": STORY_ONE, "stance": "supports", "span": "financed with a government grant"}])
+    client, llm, fetcher, _ = build_client(events_dir, scenario)  # the search only found OFFICIAL
+    body = client.post("/check", json={"text": scenario["input_text"]}).json()
+    assert body["claims"][0]["evidence"] == [] and STORY_ONE not in fetcher.calls
+
+
+def test_fact_check_key_is_optional_in_settings(monkeypatch):
+    monkeypatch.delenv("FACT_CHECK_API_KEY", raising=False)
+    assert make_settings(Path(".")).fact_check_api_key is None

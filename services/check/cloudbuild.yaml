@@ -1,0 +1,5 @@
+# Builds the Check image from the repo root: gcloud builds submit --config services/check/cloudbuild.yaml
+steps:
+  - name: gcr.io/cloud-builders/docker
+    args: ["build", "-f", "services/check/Dockerfile", "-t", "${_IMAGE}", "."]
+images: ["${_IMAGE}"]

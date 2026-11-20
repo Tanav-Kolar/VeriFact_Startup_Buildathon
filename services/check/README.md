@@ -21,17 +21,33 @@ unsupported_image | unsupported_url | unreadable_url`, `429 rate_limited | daily
 `500 internal_error`, `502 upstream_error`, `503 check_disabled | store_unavailable`,
 `504 timeout`. Every error, including unexpected ones, is JSON and carries the CORS headers.
 
-## How a check runs
+## How a check runs (Google ADK)
 
-1. **Extract** (Gemini, JSON): up to 2 factual claims copied verbatim from the input (or read from
-   the image), matched against the event's `claims_to_check`. An id the config does not have is
-   dropped.
-2. **Ground** (Gemini + Google Search): only the source URLs are used, taken from grounding
-   metadata.
-3. **Fetch** each source (public http(s) only, social platforms refused, redirects re-validated,
-   size capped).
-4. **Stance** (Gemini, JSON): per page, supports / contradicts / neutral plus a quoted span. A span
-   that is not an exact substring of the fetched page is dropped (P1.2, P7.1).
+The pipeline is an ADK agent tree, the same shape as the legacy one. ADK runs the agents and passes
+data between them through session state; the service only starts the run and validates the result.
+
+```
+SequentialAgent  check_pipeline
+  claims_extractor      text or image in, every checkable claim out (no cap on the number)
+  ParallelAgent  research
+    web_search          Google Search; only its grounding sources are used (URLs from the API)
+    fact_checker        Google Fact Check Tools API, through a tool
+  evidence_reader       opens the pages the search found with the read_page tool, quotes the passage
+  report_generator      tag, summary, conclusions and credibility notes
+```
+
+- **Claims** are copied verbatim from the input and matched against the event's `claims_to_check`.
+  An id the config does not have is dropped, and a claim that is not a verbatim part of the input
+  is dropped (images have no text to compare, so they pass).
+- **Evidence** counts only when the quote appears exactly in the page it names (P1.2, P7.1). The
+  reader can open only the pages the search found, through the SSRF-guarded fetcher.
+- **Fact-checks** are recorded by the tool exactly as the API returned them, so a rating or URL is
+  never model output (P7.3). Without `FACT_CHECK_API_KEY` the agent skips itself and makes no model call.
+- **Callbacks** count every model call against the daily cap, skip agents with nothing to do (no
+  claims, no pages), and add the claims to the model's input as untrusted data. User text, pages and
+  images are never placed in a system instruction.
+- **The cap:** if it stops any agent before the report step, the check is refused with 429. If it
+  only stops the report step, the claim cards are returned with a neutral report.
 
 `self_reported`, `source_type` and `conflict` come from the event config, never from the model.
 
@@ -69,17 +85,17 @@ the service refuses to start without them.
 
 Also required: `GCP_PROJECT`, `GCP_REGION`, `GEMINI_MODEL` (Flash-Lite model ID), `EVENT_ID`.
 Optional: `EVENTS_DIR` (default `events`), `CHECK_ENABLED` (default `true`; `false` serves only
-cached checks), `LOG_LEVEL`, `CHECK_REQUEST_TIMEOUT_S` (default `45`; whole-request deadline, then
-`504`), and `TRUSTED_PROXY_HOPS` (default `1`).
+cached checks), `LOG_LEVEL`, `CHECK_REQUEST_TIMEOUT_S` (default `80`; whole-request deadline, then
+`504`), `FACT_CHECK_API_KEY` (see below), and `TRUSTED_PROXY_HOPS` (default `1`).
 
 `TRUSTED_PROXY_HOPS` is how many proxies append to `X-Forwarded-For` before a request reaches the
 service. `1` is right for Cloud Run reached directly. Behind a load balancer or custom domain set
 `2`, otherwise every user shares the load balancer's rate-limit bucket. Entries further left are
 written by the client and are ignored. IPv6 clients are limited per /64.
 
-A check costs at most `1 + 2 x 2 + 1` model calls (extract, ground and stance per claim, then one
-report), all counted against the daily cap. If the cap is reached before the report step, the cards
-are still returned with a neutral report. Identical input is served from a content-hash cache and spends
+A check makes roughly 6 to 8 model calls (extractor, search, fact-check when configured, the reader's
+two turns, report), each counted against the daily cap. They run in five stages, so a check takes
+about 45 to 50 seconds with `gemini-3.5-flash-lite` in `asia-south1`. Identical input is served from a content-hash cache and spends
 nothing.
 
 ## Privacy
@@ -87,6 +103,27 @@ nothing.
 Reports in Firestore `check_reports/{report_id}` hold the claim cards, `input_type`, `created_at`
 and `content_hash`, and no user ID, IP, install ID or input text. Rate limiting keys clients by a
 salted hash held in memory only, and logs carry neither IPs nor input.
+
+## Fact Check Tools API key
+
+Create an API key restricted to the Fact Check Tools API, then store it in Secret Manager as
+`fact-check-api-key` (`deploy.sh` mounts it as `FACT_CHECK_API_KEY`). Locally, set
+`FACT_CHECK_API_KEY` in the environment. The key is sent in an `X-Goog-Api-Key` header, never in a URL.
+
+## Deploy to Cloud Run
+
+```bash
+# from the repo root, with the settings in the environment
+services/check/deploy.sh            # prints every command and changes nothing
+services/check/deploy.sh --apply    # runs them
+```
+
+It enables the APIs, creates the `verifact-check` service account (Vertex AI user, Firestore user,
+Secret Manager accessor), builds the image with Cloud Build, and deploys `check` with
+`min-instances=0`, `max-instances=2`, 1 GiB, and public access (the extension and web app call it;
+the per-client rate limit and the daily call cap bound the cost). Set `CORS_ORIGINS` to the deployed
+web origin. The rate limit and daily cap are per instance, so the worst case is the cap times
+`MAX_INSTANCES`.
 
 ## Run and test
 
