@@ -14,16 +14,18 @@ import {
 import { Header } from '../components/Header'
 import { Inspector } from '../components/Inspector'
 import { NebulaGraph } from '../components/NebulaGraph'
-import { StorylineRail } from '../components/StorylineRail'
+import { STORYLINE_EMERGE_THRESHOLD, StorylineRail } from '../components/StorylineRail'
 import { Timeline } from '../components/Timeline'
 import { TrustStrip } from '../components/TrustStrip'
 import type {
   ClaimCardData,
   EventDetail,
+  FirstSeen,
   FrameData,
   GraphEdgeData,
   GraphNodeData,
   ItemDetail,
+  PlatformReached,
   StorylineDetail,
   StorylineRow,
   TimingSignal,
@@ -70,6 +72,35 @@ function mergeFrames(existing: FrameData[], incoming: FrameData[]): FrameData[] 
   return Array.from(byHour.values()).sort((a, b) => a.hour - b.hour)
 }
 
+function resolvePreEmergenceLandingHour(loadedFrames: FrameData[]): number | null {
+  if (loadedFrames.length === 0) return null
+  const sorted = [...loadedFrames].sort((a, b) => a.hour - b.hour)
+  const seenIds = new Set<string>()
+  const countsByStoryline = new Map<string, number>()
+  let lastPreEmergenceHour: number | null = null
+
+  for (const frame of sorted) {
+    for (const node of frame.nodes_added) {
+      if (seenIds.has(node.id)) continue
+      seenIds.add(node.id)
+      const sid = node.storyline_id ?? 'unassigned'
+      countsByStoryline.set(sid, (countsByStoryline.get(sid) ?? 0) + 1)
+    }
+
+    const anyEmerged = Array.from(countsByStoryline.values()).some(
+      (c) => c >= STORYLINE_EMERGE_THRESHOLD
+    )
+    if (anyEmerged) {
+      break
+    }
+    if (frame.nodes_added.length > 0) {
+      lastPreEmergenceHour = frame.hour
+    }
+  }
+
+  return lastPreEmergenceHour
+}
+
 export function WorkspacePage() {
   const { eventId = '' } = useParams<{ eventId: string }>()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -99,11 +130,44 @@ export function WorkspacePage() {
   const [selectedClaim, setSelectedClaim] = useState<ClaimCardData | null>(null)
   const [inspectorLoading, setInspectorLoading] = useState(false)
   const [inspectorError, setInspectorError] = useState<string | null>(null)
+  const [enabledPlatforms, setEnabledPlatforms] = useState<string[]>([])
 
   const storylinesCacheRef = useRef<Map<number, StorylineRow[]>>(new Map())
   const storylinesInFlightRef = useRef<Set<number>>(new Set())
   const prefetchedFrameWindowsRef = useRef<Set<string>>(new Set())
   const initialFramesLoadedRef = useRef(false)
+  const knownPlatformsRef = useRef<Set<string>>(new Set())
+
+  const availablePlatforms = useMemo(() => {
+    const set = new Set<string>((eventDetail?.sources ?? []).map((s) => s.toLowerCase()))
+    for (const f of frames) {
+      for (const n of f.nodes_added) {
+        if (n.platform) set.add(n.platform.toLowerCase())
+      }
+    }
+    return Array.from(set)
+  }, [eventDetail?.sources, frames])
+
+  useEffect(() => {
+    if (availablePlatforms.length === 0) return
+    const newlyDiscovered = availablePlatforms.filter((p) => !knownPlatformsRef.current.has(p))
+    if (newlyDiscovered.length === 0) return
+    for (const p of newlyDiscovered) {
+      knownPlatformsRef.current.add(p)
+    }
+    setEnabledPlatforms((prev) => [...prev, ...newlyDiscovered])
+  }, [availablePlatforms])
+
+  const handleTogglePlatform = useCallback((platform: string) => {
+    const plat = platform.toLowerCase()
+    setEnabledPlatforms((prev) =>
+      prev.includes(plat) ? prev.filter((p) => p !== plat) : [...prev, plat]
+    )
+  }, [])
+
+  const handleResetPlatforms = useCallback(() => {
+    setEnabledPlatforms(availablePlatforms)
+  }, [availablePlatforms])
 
   // Reset per-event caches on event change
   useEffect(() => {
@@ -111,6 +175,8 @@ export function WorkspacePage() {
     storylinesInFlightRef.current.clear()
     prefetchedFrameWindowsRef.current.clear()
     initialFramesLoadedRef.current = false
+    knownPlatformsRef.current.clear()
+    setEnabledPlatforms([])
     setIsPlaying(false)
     setHour(resolveInitialPlayheadHour(searchParams.get('t'), []))
   }, [eventId])
@@ -139,18 +205,23 @@ export function WorkspacePage() {
           const explicitT = searchParams.get('t')
           const resolved = resolveInitialPlayheadHour(explicitT, loadedFrames)
           if (!explicitT) {
-            const hasNodesAtResolved = loadedFrames.some(
-              (f) => f.hour <= resolved && f.nodes_added.length > 0
-            )
-            if (!hasNodesAtResolved) {
-              const latestWithNodes = loadedFrames.reduce<number | null>(
-                (acc, f) =>
-                  f.nodes_added.length > 0 && (acc === null || f.hour > acc) ? f.hour : acc,
-                null
-              )
-              setHour(latestWithNodes ?? resolved)
+            const preEmergenceHour = resolvePreEmergenceLandingHour(loadedFrames)
+            if (preEmergenceHour !== null) {
+              setHour(preEmergenceHour)
             } else {
-              setHour(resolved)
+              const hasNodesAtResolved = loadedFrames.some(
+                (f) => f.hour <= resolved && f.nodes_added.length > 0
+              )
+              if (!hasNodesAtResolved) {
+                const latestWithNodes = loadedFrames.reduce<number | null>(
+                  (acc, f) =>
+                    f.nodes_added.length > 0 && (acc === null || f.hour > acc) ? f.hour : acc,
+                  null
+                )
+                setHour(latestWithNodes ?? resolved)
+              } else {
+                setHour(resolved)
+              }
             }
           } else {
             setHour(resolved)
@@ -593,6 +664,101 @@ export function WorkspacePage() {
     )
   }, [setSearchParams])
 
+  // Compute platform-filtered storyline counts & early signals for the emergent left rail
+  const { railStorylines, earlySignalCount } = useMemo(() => {
+    if (frames.length === 0) {
+      return { railStorylines: storylines, earlySignalCount: 0 }
+    }
+
+    const allowedSet = new Set(enabledPlatforms.map((p) => p.toLowerCase()))
+    const seenNodeIds = new Set<string>()
+    const statsByStoryline = new Map<
+      string,
+      {
+        count: number
+        firstSeen: FirstSeen | null
+        platformFirstHour: Map<string, number>
+      }
+    >()
+
+    const sortedFrames = [...frames]
+      .filter((f) => f.hour <= hour)
+      .sort((a, b) => a.hour - b.hour)
+
+    for (const frame of sortedFrames) {
+      for (const node of frame.nodes_added) {
+        if (node.hour > hour || seenNodeIds.has(node.id)) continue
+        seenNodeIds.add(node.id)
+
+        const plat = node.platform.toLowerCase()
+        if (!allowedSet.has(plat)) continue
+
+        const sid = node.storyline_id ?? 'unassigned'
+        let entry = statsByStoryline.get(sid)
+        if (!entry) {
+          entry = {
+            count: 0,
+            firstSeen: null,
+            platformFirstHour: new Map<string, number>()
+          }
+          statsByStoryline.set(sid, entry)
+        }
+        entry.count += 1
+        if (!entry.firstSeen || node.hour < entry.firstSeen.hour) {
+          entry.firstSeen = { item_id: node.id, platform: plat, hour: node.hour }
+        }
+        const prevPlatHour = entry.platformFirstHour.get(plat)
+        if (prevPlatHour === undefined || node.hour < prevPlatHour) {
+          entry.platformFirstHour.set(plat, node.hour)
+        }
+      }
+    }
+
+    const knownStorylines = new Map<string, StorylineRow>()
+    for (const row of storylines) {
+      knownStorylines.set(row.id, row)
+    }
+
+    const allIds = new Set<string>([
+      ...knownStorylines.keys(),
+      ...statsByStoryline.keys()
+    ])
+
+    let earlySignals = 0
+    const mergedRows: StorylineRow[] = []
+
+    for (const sid of allIds) {
+      const base = knownStorylines.get(sid)
+      const stat = statsByStoryline.get(sid)
+      const count = stat?.count ?? 0
+      if (count > 0 && count < STORYLINE_EMERGE_THRESHOLD) {
+        earlySignals += 1
+      }
+      const platformsReached: PlatformReached[] = stat
+        ? Array.from(stat.platformFirstHour.entries())
+            .map(([platform, firstH]) => ({ platform, hour: firstH }))
+            .sort((a, b) => a.hour - b.hour)
+        : []
+
+      mergedRows.push({
+        id: sid,
+        name: base?.name ?? (sid === 'unassigned' ? 'Unassigned' : sid),
+        colour_index: base?.colour_index ?? mergedRows.length,
+        count,
+        first_seen: stat?.firstSeen ?? null,
+        platforms_reached: platformsReached,
+        stance_mix: base?.stance_mix ?? null,
+        agreement: base?.agreement ?? null,
+        top_amplifiers: base?.top_amplifiers ?? []
+      })
+    }
+
+    return {
+      railStorylines: mergedRows,
+      earlySignalCount: earlySignals
+    }
+  }, [frames, hour, enabledPlatforms, storylines])
+
   // Items matching the currently focused storyline up to playhead hour (P1.6 expandable count)
   const focusedStorylineItems = useMemo(() => {
     if (!focusedStorylineId) return []
@@ -668,10 +834,11 @@ export function WorkspacePage() {
 
       <main className="vf-workspace-main">
         <StorylineRail
-          storylines={storylines}
-          enabledSources={eventDetail?.sources ?? []}
+          storylines={railStorylines}
+          enabledSources={availablePlatforms}
           focusedStorylineId={focusedStorylineId}
           onToggleFocus={handleToggleFocus}
+          earlySignalCount={earlySignalCount}
         />
 
         <NebulaGraph
@@ -679,6 +846,9 @@ export function WorkspacePage() {
           frames={frames}
           storylines={storylines}
           enabledSources={eventDetail?.sources ?? []}
+          enabledPlatforms={enabledPlatforms}
+          onTogglePlatform={handleTogglePlatform}
+          onResetPlatforms={handleResetPlatforms}
           currentHour={hour}
           focusedStorylineId={focusedStorylineId}
           selectedNodeId={selectedNodeId}
