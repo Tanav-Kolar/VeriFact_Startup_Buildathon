@@ -1,4 +1,5 @@
-import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { BrowserRouter, HashRouter, Navigate, Route, Routes } from 'react-router-dom'
+import { isStaticMode } from './api/client'
 import { BeforeAfterPage } from './pages/BeforeAfterPage'
 import { BriefPage } from './pages/BriefPage'
 import { CheckPage } from './pages/CheckPage'
@@ -6,8 +7,9 @@ import { EventRedirectPage } from './pages/EventRedirectPage'
 import { WorkspacePage } from './pages/WorkspacePage'
 
 export function App() {
+  const Router = isStaticMode() ? HashRouter : BrowserRouter
   return (
-    <BrowserRouter>
+    <Router>
       <Routes>
         <Route path="/" element={<EventRedirectPage />} />
         <Route path="/e/:eventId" element={<WorkspacePage />} />
@@ -16,7 +18,7 @@ export function App() {
         <Route path="/check" element={<CheckPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </BrowserRouter>
+    </Router>
   )
 }
 export default App
