@@ -1,0 +1,145 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cloud-run-main
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT: ${{ vars.GCP_PROJECT }}
+  GCP_REGION: ${{ vars.GCP_REGION }}
+  AR_REPO: ${{ vars.AR_REPO || 'verifact' }}
+  BQ_DATASET: ${{ vars.BQ_DATASET || 'verifact' }}
+  EVENT_ID: ${{ vars.EVENT_ID }}
+  EVENT_CONFIG: ${{ vars.EVENT_CONFIG }}
+  GRAPH_BACKEND: ${{ vars.GRAPH_BACKEND || 'frames' }}
+  SPANNER_INSTANCE: ${{ vars.SPANNER_INSTANCE }}
+  SPANNER_DATABASE: ${{ vars.SPANNER_DATABASE || 'verifact' }}
+  SPANNER_LIVE: ${{ vars.SPANNER_LIVE || 'false' }}
+  GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3-flash-preview' }}
+  MAX_INSTANCES: ${{ vars.MAX_INSTANCES || '3' }}
+
+jobs:
+  deploy:
+    name: Build & deploy api, check, and web
+    runs-on: ubuntu-latest
+    if: ${{ (secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '') || secrets.GCP_SA_KEY != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate required repository variables
+        run: |
+          : "${GCP_PROJECT:?Set repository variable GCP_PROJECT}"
+          : "${GCP_REGION:?Set repository variable GCP_REGION}"
+
+      - name: Authenticate to Google Cloud (Workload Identity)
+        if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && secrets.GCP_SERVICE_ACCOUNT != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Authenticate to Google Cloud (Service Account Key)
+        if: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER == '' && secrets.GCP_SA_KEY != '' }}
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up gcloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker auth for Artifact Registry
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build & push API image
+        run: |
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO}/api:${GITHUB_SHA::7}"
+          docker build -f services/api/Dockerfile -t "${IMAGE}" .
+          docker push "${IMAGE}"
+          echo "API_IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Deploy API service to Cloud Run
+        run: |
+          gcloud run deploy api \
+            --project="${GCP_PROJECT}" \
+            --region="${GCP_REGION}" \
+            --image="${API_IMAGE}" \
+            --allow-unauthenticated \
+            --min-instances=0 \
+            --max-instances="${MAX_INSTANCES}" \
+            --set-env-vars="GCP_PROJECT=${GCP_PROJECT},GCP_REGION=${GCP_REGION},BQ_DATASET=${BQ_DATASET},GRAPH_BACKEND=${GRAPH_BACKEND},SPANNER_INSTANCE=${SPANNER_INSTANCE},SPANNER_DATABASE=${SPANNER_DATABASE},SPANNER_LIVE=${SPANNER_LIVE},CORS_ORIGINS=*"
+          API_URL="$(gcloud run services describe api --project="${GCP_PROJECT}" --region="${GCP_REGION}" --format='value(status.url)')"
+          echo "API_URL=${API_URL}" >> "$GITHUB_ENV"
+
+      - name: Resolve Check service URL
+        run: |
+          CHECK_URL="$(gcloud run services describe check --project="${GCP_PROJECT}" --region="${GCP_REGION}" --format='value(status.url)' 2>/dev/null || true)"
+          echo "CHECK_URL=${CHECK_URL}" >> "$GITHUB_ENV"
+
+      - name: Build & push Check image
+        if: ${{ env.EVENT_ID != '' }}
+        run: |
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO}/check:${GITHUB_SHA::7}"
+          docker build -f services/check/Dockerfile -t "${IMAGE}" .
+          docker push "${IMAGE}"
+          echo "CHECK_IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Deploy Check service to Cloud Run
+        if: ${{ env.EVENT_ID != '' }}
+        run: |
+          WEB_URL_EXISTING="$(gcloud run services describe web --project="${GCP_PROJECT}" --region="${GCP_REGION}" --format='value(status.url)' 2>/dev/null || true)"
+          CORS_LIST="http://localhost:5173,http://127.0.0.1:5173"
+          if [ -n "${WEB_URL_EXISTING}" ]; then
+            CORS_LIST="${WEB_URL_EXISTING},${CORS_LIST}"
+          fi
+          SECRET_ARGS=()
+          if gcloud secrets describe fact-check-api-key --project="${GCP_PROJECT}" >/dev/null 2>&1; then
+            SECRET_ARGS=(--set-secrets "FACT_CHECK_API_KEY=fact-check-api-key:latest")
+          fi
+          ENV_VARS="^@^GCP_PROJECT=${GCP_PROJECT}@GCP_REGION=${GCP_REGION}@GEMINI_MODEL=${GEMINI_MODEL}@EVENT_ID=${EVENT_ID}@CORS_ORIGINS=${CORS_LIST}@CHECK_RATE_LIMIT_PER_MIN=10@CHECK_DAILY_CALL_CAP=500@CHECK_MAX_INPUT_CHARS=4000@CHECK_MAX_IMAGE_BYTES=5000000"
+          gcloud run deploy check \
+            --project="${GCP_PROJECT}" \
+            --region="${GCP_REGION}" \
+            --image="${CHECK_IMAGE}" \
+            --allow-unauthenticated \
+            --min-instances=0 \
+            --max-instances=2 \
+            --memory=1Gi \
+            --cpu=1 \
+            --concurrency=20 \
+            --timeout=120 \
+            --set-env-vars="${ENV_VARS}" \
+            "${SECRET_ARGS[@]}"
+          CHECK_URL="$(gcloud run services describe check --project="${GCP_PROJECT}" --region="${GCP_REGION}" --format='value(status.url)')"
+          echo "CHECK_URL=${CHECK_URL}" >> "$GITHUB_ENV"
+
+      - name: Build & push Web UI image
+        run: |
+          IMAGE="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT}/${AR_REPO}/web:${GITHUB_SHA::7}"
+          docker build \
+            --build-arg "VITE_API_BASE_URL=${API_URL}" \
+            --build-arg "VITE_CHECK_BASE_URL=${CHECK_URL}" \
+            -t "${IMAGE}" \
+            web
+          docker push "${IMAGE}"
+          echo "WEB_IMAGE=${IMAGE}" >> "$GITHUB_ENV"
+
+      - name: Deploy Web UI service to Cloud Run
+        run: |
+          gcloud run deploy web \
+            --project="${GCP_PROJECT}" \
+            --region="${GCP_REGION}" \
+            --image="${WEB_IMAGE}" \
+            --allow-unauthenticated \
+            --min-instances=0 \
+            --max-instances="${MAX_INSTANCES}"
+          WEB_URL="$(gcloud run services describe web --project="${GCP_PROJECT}" --region="${GCP_REGION}" --format='value(status.url)')"
+          echo "Deployed Web UI: ${WEB_URL}"
