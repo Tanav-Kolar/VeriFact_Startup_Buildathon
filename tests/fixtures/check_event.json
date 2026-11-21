@@ -1,0 +1,27 @@
+{
+  "synthetic": true,
+  "note": "Synthetic event config for tests/test_check.py. Written to tmp_path/test-event.yaml by the test; never loaded by a deployed event.",
+  "event": {
+    "event_id": "test-event",
+    "name": "Test Event",
+    "t0": {"utc": "2026-01-01T00:00:00Z"},
+    "window": {"pre_hours": 2, "post_hours": 48},
+    "official": {
+      "accounts": ["@testco"],
+      "urls": ["https://official.example.test/blog"],
+      "spokespeople": ["Dana Example"]
+    },
+    "keywords": {"core": ["widget"]},
+    "sources": {"hn": {"enabled": true}},
+    "seed_storylines": [
+      {"id": "subsidised-hardware", "name": "Subsidised hardware", "seeds": ["synthetic seed sentence"]}
+    ],
+    "claims_to_check": [
+      {"id": "subsidised-hardware", "text": "The Widget Factory runs on subsidised hardware"},
+      {"id": "privately-financed", "text": "The Widget Factory hardware was privately financed"}
+    ],
+    "conflicts_of_interest": [
+      {"person": "Pat Investor", "relationship": "Investor in the company (synthetic)"}
+    ]
+  }
+}
